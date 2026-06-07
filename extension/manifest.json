@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "MinusWiki Web Clipper",
+  "version": "1.0",
+  "description": "Lưu tài liệu, văn bản hoặc trang web trực tiếp vào Cơ sở tri thức cá nhân MinusWiki.",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "contextMenus",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://localhost:3000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

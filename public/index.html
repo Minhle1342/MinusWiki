@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MinusWiki - Personal Knowledge Base</title>
+  
+  <!-- SEO Meta Tags -->
+  <meta name="description" content="MinusWiki - Hệ thống quản lý tri thức cá nhân tự động biên soạn từ tài liệu của bạn bằng công nghệ LLM tiên tiến.">
+  
+  <!-- Google Fonts: Plus Jakarta Sans & Space Grotesk -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+  
+  <!-- CSS Stylesheet -->
+  <link rel="stylesheet" href="style.css">
+  
+  <!-- External Libraries -->
+  <!-- Marked.js for markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- D3.js for interactive knowledge graph -->
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <!-- Lucide Icons for premium modern vector icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body class="dark-theme">
+  <!-- Glassmorphic Background Glows -->
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+  <div class="bg-glow bg-glow-3"></div>
+
+  <!-- Toast Notification System -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- Main Grid App Container -->
+  <div class="app-container">
+    
+    <!-- Top Header -->
+    <header class="app-header glass-card">
+      <div class="header-logo">
+        <div class="logo-icon-wrap">
+          <i data-lucide="brain-circuit" class="logo-icon animate-pulse"></i>
+        </div>
+        <h1>Minus<span>Wiki</span></h1>
+      </div>
+      
+      <!-- Project Switcher & Actions -->
+      <div class="header-actions">
+        <div class="project-selector-wrapper">
+          <label for="project-select" class="sr-only">Chọn dự án</label>
+          <select id="project-select" class="glass-select">
+            <option value="" disabled selected>Đang tải dự án...</option>
+          </select>
+        </div>
+        <button id="btn-create-project-trigger" class="btn btn-primary btn-icon-text">
+          <i data-lucide="plus-circle"></i>
+          <span>Dự án mới</span>
+        </button>
+        <button id="btn-delete-project" class="btn btn-danger btn-icon" title="Xóa dự án hiện tại">
+          <i data-lucide="trash-2"></i>
+        </button>
+        <button id="btn-settings-trigger" class="btn btn-secondary btn-icon" title="Cấu hình hệ thống (API Keys)">
+          <i data-lucide="settings"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Workspace Layout -->
+    <div class="workspace-layout">
+      
+      <!-- Sidebar Panel (Left) -->
+      <aside class="sidebar-panel glass-card" id="sidebar-left">
+        <!-- Sidebar Navigation Tabs -->
+        <div class="sidebar-tabs">
+          <button class="tab-btn active" data-target="tab-pages" id="tab-btn-pages">
+            <i data-lucide="files"></i>
+            <span>Tri thức</span>
+          </button>
+          <button class="tab-btn" data-target="tab-sources" id="tab-btn-sources">
+            <i data-lucide="hard-drive"></i>
+            <span>Tài liệu</span>
+          </button>
+          <button class="tab-btn" data-target="tab-logs" id="tab-btn-logs">
+            <i data-lucide="file-clock"></i>
+            <span>Nhật ký</span>
+          </button>
+          <button class="tab-btn" data-target="tab-maintenance" id="tab-btn-maintenance">
+            <i data-lucide="shield-alert"></i>
+            <span>Tối ưu</span>
+          </button>
+        </div>
+
+        <div class="sidebar-tab-content">
+          <!-- Tab 1: Wiki Pages -->
+          <div id="tab-pages" class="tab-pane active">
+            <div class="tab-pane-header">
+              <h3>Các trang tri thức</h3>
+            </div>
+            
+            <div class="search-box-wrapper">
+              <input type="text" id="wiki-search" placeholder="Tìm kiếm trang tri thức..." class="glass-input">
+              <i data-lucide="search" class="search-icon"></i>
+            </div>
+            
+            <div class="wiki-tree-container">
+              <ul id="wiki-page-list" class="wiki-list">
+                <li class="empty-state">
+                  <i data-lucide="folder-open"></i>
+                  <p>Chưa có trang tri thức nào. Hãy nạp tài liệu để bắt đầu!</p>
+                </li>
+              </ul>
+            </div>
+          </div>
+
+          <!-- Tab 2: Sources Upload & Management -->
+          <div id="tab-sources" class="tab-pane">
+            <div class="tab-pane-header">
+              <h3>Quản lý nguồn tri thức</h3>
+            </div>
+
+            <!-- Upload Area -->
+            <div class="upload-dropzone" id="upload-zone">
+              <input type="file" id="file-input" multiple class="file-input-hidden" accept=".pdf,.docx,.xlsx,.xls,.txt,.md,.json,.csv">
+              <div class="dropzone-content">
+                <div class="upload-icon-wrap">
+                  <i data-lucide="upload-cloud"></i>
+                </div>
+                <p class="dropzone-title">Kéo & thả tệp tin vào đây</p>
+                <p class="dropzone-subtitle">Hỗ trợ PDF, DOCX, XLSX, TXT, MD</p>
+                <span class="btn btn-secondary btn-sm">Chọn tệp</span>
+              </div>
+            </div>
+
+            <!-- Upload Progress Info -->
+            <div id="upload-progress-wrapper" class="upload-progress-wrapper hidden">
+              <div class="progress-info">
+                <span id="upload-progress-text">Đang tải và xử lý...</span>
+                <span id="upload-progress-percent">0%</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div id="upload-progress-bar" class="progress-bar-fill"></div>
+              </div>
+            </div>
+
+            <!-- Sources List -->
+            <div class="sources-list-section">
+              <h4>Tài liệu đã nạp</h4>
+              <ul id="sources-list" class="sources-list">
+                <li class="empty-state">
+                  <i data-lucide="file-text"></i>
+                  <p>Chưa có tài liệu nguồn nào được tải lên.</p>
+                </li>
+              </ul>
+            </div>
+
+            <!-- Ingestion Queue Section -->
+            <div class="sources-list-section" id="queue-section" style="margin-top: 15px; border-top: 1px solid var(--border-color); padding-top: 15px;">
+              <h4>Tiến trình xử lý tài liệu</h4>
+              <ul id="queue-list" class="sources-list queue-list">
+                <li class="empty-state">
+                  <i data-lucide="clock"></i>
+                  <p>Không có tệp nào đang xếp hàng hoặc xử lý.</p>
+                </li>
+              </ul>
+            </div>
+          </div>
+
+          <!-- Tab 3: Activity Logs -->
+          <div id="tab-logs" class="tab-pane">
+            <div class="tab-pane-header">
+              <h3>Nhật ký hoạt động</h3>
+            </div>
+            <div class="logs-container-wrap">
+              <div id="logs-content" class="logs-content">Chưa có nhật ký hoạt động...</div>
+            </div>
+          </div>
+
+          <!-- Tab 4: Maintenance & Optimization -->
+          <div id="tab-maintenance" class="tab-pane">
+            <div class="tab-pane-header">
+              <h3>Phân tích & Tối ưu</h3>
+            </div>
+            
+            <div class="maintenance-actions" style="padding: 0 15px 15px 15px;">
+              <button id="btn-run-maintenance" class="btn btn-primary btn-block btn-icon-text" style="width: 100%; justify-content: center;">
+                <i data-lucide="wrench"></i>
+                <span>Chạy phân tích Wiki</span>
+              </button>
+            </div>
+
+            <div class="maintenance-scroll-area" style="padding: 0 15px; overflow-y: auto; max-height: calc(100vh - 280px);">
+              <!-- Orphan Pages Section -->
+              <div class="maintenance-section">
+                <h4 class="maintenance-sec-title" style="display: flex; align-items: center; gap: 8px; color: var(--text-color); margin-bottom: 10px; font-size: 14px; font-weight: 600;">
+                  <i data-lucide="link-2-off" style="color: var(--primary-color); width: 16px; height: 16px;"></i>
+                  <span>Trang mồ côi (Orphans)</span>
+                </h4>
+                <ul id="orphan-pages-list" class="sources-list">
+                  <li class="empty-state">
+                    <p>Nhấp nút trên để quét tìm trang mồ côi.</p>
+                  </li>
+                </ul>
+              </div>
+
+              <!-- Investigation Gaps Section -->
+              <div class="maintenance-section" style="margin-top: 25px;">
+                <h4 class="maintenance-sec-title" style="display: flex; align-items: center; gap: 8px; color: var(--text-color); margin-bottom: 10px; font-size: 14px; font-weight: 600;">
+                  <i data-lucide="lightbulb" style="color: #ecc94b; width: 16px; height: 16px;"></i>
+                  <span>Lỗ hổng nghiên cứu (Gaps)</span>
+                </h4>
+                <ul id="gaps-list" class="sources-list gap-list-container">
+                  <li class="empty-state">
+                    <p>Nhấp nút trên để quét lỗ hổng tri thức.</p>
+                  </li>
+                </ul>
+              </div>
+
+              <!-- Contradictions Log Section -->
+              <div class="maintenance-section" style="margin-top: 25px; margin-bottom: 25px;">
+                <h4 class="maintenance-sec-title" style="display: flex; align-items: center; gap: 8px; color: var(--text-color); margin-bottom: 10px; font-size: 14px; font-weight: 600;">
+                  <i data-lucide="alert-triangle" style="color: #f56565; width: 16px; height: 16px;"></i>
+                  <span>Thông tin mâu thuẫn</span>
+                </h4>
+                <ul id="contradictions-list" class="sources-list">
+                  <li class="empty-state">
+                    <p>Chưa có thông tin mâu thuẫn được gắn cờ.</p>
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Main Reader/Editor Panel (Center) -->
+      <main class="main-content-panel glass-card" id="main-content">
+        <!-- No Page Selected Screen -->
+        <div id="no-page-selected" class="no-page-selected">
+          <div class="welcome-box">
+            <div class="welcome-icon-wrap">
+              <i data-lucide="book-open"></i>
+            </div>
+            <h2>Chào mừng bạn đến với MinusWiki!</h2>
+            <p>Hệ thống tự động phân tích tài liệu và cấu trúc hóa kiến thức cá nhân của bạn dưới dạng các trang Wiki liên kết chặt chẽ.</p>
+            <div class="quick-tips">
+              <div class="tip-item">
+                <i data-lucide="upload"></i>
+                <span>Tải tài liệu (PDF, Word, Excel...) ở tab <strong>Tài liệu</strong></span>
+              </div>
+              <div class="tip-item">
+                <i data-lucide="message-square"></i>
+                <span>Hỏi trợ lý AI ở góc phải để tìm kiếm và trả lời nhanh</span>
+              </div>
+              <div class="tip-item">
+                <i data-lucide="git-fork"></i>
+                <span>Theo dõi sơ đồ liên kết tri thức 3D tương tác</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Wiki Page Content Screen -->
+        <div id="wiki-page-view" class="wiki-page-view hidden">
+          <!-- Page Header Toolbar -->
+          <div class="page-toolbar">
+            <div class="page-title-area">
+              <i data-lucide="file-text" class="title-doc-icon"></i>
+              <h2 id="wiki-page-title" class="page-title">Tên Trang Wiki</h2>
+              <span id="wiki-page-filename" class="page-filename-tag">slug.md</span>
+            </div>
+            <div class="toolbar-actions">
+              <button id="btn-toggle-mpe" class="btn btn-secondary btn-icon-text" title="Chuyển đổi giao diện Markdown Preview Enhanced">
+                <i data-lucide="eye"></i>
+                <span id="mpe-toggle-text">Giao diện: Mặc định</span>
+              </button>
+              <button id="btn-edit-page" class="btn btn-secondary btn-icon-text">
+                <i data-lucide="edit-3"></i>
+                <span>Chỉnh sửa</span>
+              </button>
+              <button id="btn-delete-page" class="btn btn-danger btn-icon" title="Xóa trang này">
+                <i data-lucide="trash-2"></i>
+              </button>
+            </div>
+          </div>
+
+          <!-- Reader View Mode -->
+          <div id="wiki-reader" class="wiki-reader-content markdown-body">
+            <!-- Rendered HTML will go here -->
+          </div>
+
+          <!-- Editor View Mode (Hidden by default) -->
+          <div id="wiki-editor" class="wiki-editor-container hidden">
+            <div class="editor-header">
+              <span class="editor-warning">
+                <i data-lucide="alert-circle"></i>
+                <span>Bạn đang chỉnh sửa mã nguồn Markdown của trang này.</span>
+              </span>
+            </div>
+            <textarea id="markdown-textarea" class="editor-textarea" placeholder="Nhập nội dung markdown tại đây..."></textarea>
+            <div class="editor-footer">
+              <button id="btn-save-page" class="btn btn-success btn-icon-text">
+                <i data-lucide="check"></i>
+                <span>Lưu thay đổi</span>
+              </button>
+              <button id="btn-cancel-edit" class="btn btn-secondary btn-icon-text">
+                <i data-lucide="x"></i>
+                <span>Hủy bỏ</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- Right Interactive Panel (Tabbed: Graph & Chat) -->
+      <aside class="right-interactive-panel glass-card" id="right-panel">
+        <div class="right-panel-tabs">
+          <button class="panel-tab-btn active" data-target="panel-graph" id="tab-btn-graph">
+            <i data-lucide="network"></i>
+            <span>Sơ đồ tri thức</span>
+          </button>
+          <button class="panel-tab-btn" data-target="panel-chat" id="tab-btn-chat">
+            <i data-lucide="message-square"></i>
+            <span>Hỏi đáp AI</span>
+          </button>
+        </div>
+
+        <div class="right-panel-content">
+          <!-- Sub-panel 1: Graph Visualization -->
+          <div id="panel-graph" class="panel-pane active">
+            <div class="graph-info-header">
+              <p>Biểu đồ liên kết các khái niệm tri thức của bạn (D3.js). Nhấp chuột vào một nút để mở nhanh trang tri thức đó.</p>
+              <button id="btn-refresh-graph" class="btn btn-icon btn-sm" title="Làm mới sơ đồ">
+                <i data-lucide="refresh-cw"></i>
+              </button>
+            </div>
+            <div class="graph-wrapper" id="graph-wrapper">
+              <svg id="knowledge-graph" width="100%" height="100%"></svg>
+              <!-- Zoom Control -->
+              <div class="graph-controls">
+                <button id="btn-zoom-in" class="btn btn-icon btn-sm" style="background-color: white;" title="Phóng to"><i data-lucide="zoom-in"></i></button>
+                <button id="btn-zoom-out" class="btn btn-icon btn-sm" style="background-color: white;" title="Thu nhỏ"><i data-lucide="zoom-out"></i></button>
+                <button id="btn-zoom-fit" class="btn btn-icon btn-sm" style="background-color: white;" title="Khớp sơ đồ"><i data-lucide="maximize"></i></button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Sub-panel 2: Wiki Chat Drawer -->
+          <div id="panel-chat" class="panel-pane">
+            <div class="chat-container">
+              <!-- Chat Messages Thread -->
+              <div class="chat-thread" id="chat-thread">
+                <div class="chat-message assistant">
+                  <div class="message-avatar">
+                    <i data-lucide="bot"></i>
+                  </div>
+                  <div class="message-bubble">
+                    <p>Xin chào! Tôi có thể giúp gì cho bạn? Hãy đặt bất kỳ câu hỏi nào liên quan đến các tài liệu bạn đã nạp vào Cơ sở tri thức này.</p>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Suggestions List -->
+              <div class="chat-suggestions-wrapper">
+                <div class="suggestions-label">Gợi ý câu hỏi:</div>
+                <div class="suggestions-list" id="chat-suggestions">
+                  <button class="btn btn-secondary btn-sm suggestion-item">MinusWiki là gì?</button>
+                  <button class="btn btn-secondary btn-sm suggestion-item">Làm sao nạp tài liệu mới?</button>
+                </div>
+              </div>
+
+              <!-- Message Input Form -->
+              <form id="chat-form" class="chat-input-form">
+                <input type="text" id="chat-input" placeholder="Hỏi gì đó về tài liệu nguồn..." class="glass-input" autocomplete="off">
+                <button type="submit" id="btn-chat-send" class="btn btn-primary btn-icon">
+                  <i data-lucide="send"></i>
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+    </div>
+  </div>
+
+  <!-- Create Project Modal Dialog -->
+  <div class="modal-overlay hidden" id="create-project-modal">
+    <div class="modal-box glass-card">
+      <div class="modal-header">
+        <h3>Tạo cơ sở tri thức mới</h3>
+        <button class="modal-close" id="btn-close-modal">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <form id="create-project-form">
+        <div class="form-group">
+          <label for="project-title-input">Tên cơ sở tri thức (Ví dụ: Dự án Nghiên cứu AI, Học tập Lịch sử...)</label>
+          <input type="text" id="project-title-input" required placeholder="Nhập tên dự án..." class="glass-input" maxlength="50">
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="btn-cancel-project">Hủy bỏ</button>
+          <button type="submit" class="btn btn-primary">Tạo dự án</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Settings Modal Dialog -->
+  <div class="modal-overlay hidden" id="settings-modal">
+    <div class="modal-box glass-card" style="max-width: 500px;">
+      <div class="modal-header">
+        <h3>Cấu hình hệ thống (API Keys)</h3>
+        <button class="modal-close" id="btn-close-settings-modal">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <form id="settings-form">
+        <div class="form-group">
+          <label for="settings-provider">LLM Provider</label>
+          <select id="settings-provider" class="glass-select" style="width: 100%; margin-top: 6px;">
+            <option value="gemini">Google Gemini</option>
+            <option value="openai">DeepSeek / OpenAI</option>
+          </select>
+        </div>
+
+        <div id="settings-gemini-fields">
+          <div class="form-group">
+            <label for="settings-gemini-key">Gemini API Key</label>
+            <input type="password" id="settings-gemini-key" placeholder="Nhập Gemini API Key..." class="glass-input">
+          </div>
+          <div class="form-group">
+            <label for="settings-gemini-model">Gemini Model</label>
+            <input type="text" id="settings-gemini-model" placeholder="gemini-3.1-flash-lite-preview" class="glass-input">
+          </div>
+        </div>
+
+        <div id="settings-openai-fields" class="hidden">
+          <div class="form-group">
+            <label for="settings-openai-key">DeepSeek / OpenAI API Key</label>
+            <input type="password" id="settings-openai-key" placeholder="Nhập API Key..." class="glass-input">
+          </div>
+          <div class="form-group">
+            <label for="settings-openai-model">Model Name</label>
+            <input type="text" id="settings-openai-model" placeholder="DeepSeek-V4-Flash" class="glass-input">
+          </div>
+          <div class="form-group">
+            <label for="settings-openai-base">API Base URL</label>
+            <input type="text" id="settings-openai-base" placeholder="https://api.deepseek.com" class="glass-input">
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" id="btn-cancel-settings">Hủy bỏ</button>
+          <button type="submit" class="btn btn-primary">Lưu cấu hình</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Script to run Lucide Icons -->
+  <script>
+    // Initialize Lucide icons on page load
+    document.addEventListener("DOMContentLoaded", () => {
+      lucide.createIcons();
+    });
+  </script>
+  <!-- Main Application JS Logic -->
+  <script src="app.js"></script>
+</body>
+</html>
