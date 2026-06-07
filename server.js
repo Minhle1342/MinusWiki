@@ -2114,23 +2114,32 @@ app.get('/api/projects/:id/graph', async (req, res) => {
     const nodes = [];
     const links = [];
 
-    // Initialize nodes
-    mdFiles.forEach(file => {
+    // Parse all files for frontmatter (contradiction check) and cache content
+    const contentMap = {};
+    for (const file of mdFiles) {
       const pageId = file.replace('.md', '');
+      const rawContent = await fs.readFile(path.join(wikiDir, file), 'utf-8');
+      const { frontmatter, content } = parseFrontmatter(rawContent);
+      
+      contentMap[pageId] = content;
       nodes.push({
         id: pageId,
         label: pageId.replace(/_/g, ' '),
-        size: pageId === 'index' || pageId === 'overview' ? 15 : 10
+        size: pageId === 'index' || pageId === 'overview' ? 15 : 10,
+        isContradiction: !!frontmatter.contradiction
       });
+    }
+
+    // Detect links in content and compute inDegree
+    const inDegree = {};
+    nodes.forEach(n => {
+      inDegree[n.id] = 0;
     });
 
-    // Detect links in content
     for (const file of mdFiles) {
       const sourceId = file.replace('.md', '');
-      const content = await fs.readFile(path.join(wikiDir, file), 'utf-8');
+      const content = contentMap[sourceId];
 
-      // Match Markdown link format: [label](target.md) or [label](./target.md)
-      // Captures group: target.md
       const linkRegex = /\[.*?\]\((?:\.\/)?([^)]+?\.md)\)/g;
       let match;
       while ((match = linkRegex.exec(content)) !== null) {
@@ -2145,8 +2154,49 @@ app.get('/api/projects/:id/graph', async (req, res) => {
               source: sourceId,
               target: targetId
             });
+            if (targetId !== sourceId) {
+              inDegree[targetId] = (inDegree[targetId] || 0) + 1;
+            }
           }
         }
+      }
+    }
+
+    // Mark orphans (any node other than index, overview, log with 0 inDegree)
+    nodes.forEach(n => {
+      if (n.id !== 'index' && n.id !== 'overview' && inDegree[n.id] === 0) {
+        n.isOrphan = true;
+      }
+    });
+
+    // Load research gaps from maintenance.json if it exists
+    const maintPath = path.join(PROJECTS_DIR, id, 'maintenance.json');
+    if (existsSync(maintPath)) {
+      try {
+        const maintData = JSON.parse(await fs.readFile(maintPath, 'utf-8'));
+        if (maintData && maintData.gaps) {
+          maintData.gaps.forEach((gap, idx) => {
+            const gapId = `gap-${idx}`;
+            // Add a virtual node for each gap
+            nodes.push({
+              id: gapId,
+              label: `🔍 ${gap.gap}`,
+              size: 8,
+              isGap: true,
+              description: gap.description
+            });
+            
+            // Connect the gap to overview or index so it doesn't drift away
+            const connectTarget = nodes.some(n => n.id === 'overview') ? 'overview' : 'index';
+            links.push({
+              source: connectTarget,
+              target: gapId,
+              isVirtual: true
+            });
+          });
+        }
+      } catch (e) {
+        console.error('Error reading maintenance cache for graph:', e);
       }
     }
 
@@ -2391,12 +2441,26 @@ app.get('/api/projects/:id/maintenance', async (req, res) => {
       }
     }
 
+    const orphansWithSuggestions = orphans.map(o => ({
+      ...o,
+      suggestions: orphanSuggestions[o.filename] || []
+    }));
+
+    // Save results to maintenance.json for graph visualization
+    try {
+      const maintenanceData = {
+        orphans: orphansWithSuggestions,
+        gaps,
+        contradictions
+      };
+      await fs.writeFile(path.join(PROJECTS_DIR, id, 'maintenance.json'), JSON.stringify(maintenanceData, null, 2), 'utf-8');
+    } catch (writeErr) {
+      console.error('Failed to save maintenance cache:', writeErr);
+    }
+
     res.json({
       success: true,
-      orphans: orphans.map(o => ({
-        ...o,
-        suggestions: orphanSuggestions[o.filename] || []
-      })),
+      orphans: orphansWithSuggestions,
       gaps,
       contradictions
     });

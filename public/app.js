@@ -1666,10 +1666,13 @@ const GraphManager = {
 
     // Colors mapping
     const colorScale = d3.scaleOrdinal()
-      .domain(["index", "overview", "other"])
-      .range(["#10B981", "#0EA5E9", "#6366F1"]); // Green, sky blue, Indigo
+      .domain(["index", "overview", "contradiction", "orphan", "gap", "other"])
+      .range(["#10B981", "#0EA5E9", "#EF4444", "#F59E0B", "#A855F7", "#6366F1"]); // Green, sky blue, Red, Orange, Purple, Indigo
 
     const getNodeColor = (d) => {
+      if (d.isContradiction) return '#EF4444'; // Red for contradiction
+      if (d.isOrphan) return '#F59E0B';        // Orange/Yellow for orphans
+      if (d.isGap) return '#A855F7';           // Purple for gaps
       if (d.id === 'index') return '#10B981';
       if (d.id === 'overview') return '#0EA5E9';
       return '#6366F1';
@@ -1688,7 +1691,9 @@ const GraphManager = {
       .selectAll("line")
       .data(data.links)
       .enter().append("line")
-      .attr("class", "graph-link");
+      .attr("class", "graph-link")
+      .style("stroke-dasharray", d => d.isVirtual ? "4,4" : "none")
+      .style("stroke", d => d.isVirtual ? "rgba(168, 85, 247, 0.4)" : "rgba(255, 255, 255, 0.08)");
 
     // Render node groups (wrapper to hold node and text)
     const nodeGroup = this.g.append("g")
@@ -1704,9 +1709,15 @@ const GraphManager = {
       .attr("class", "graph-node")
       .attr("r", d => d.id === 'index' || d.id === 'overview' ? 14 : 9)
       .attr("fill", getNodeColor)
+      .style("stroke", d => d.isGap ? "#A855F7" : "none")
+      .style("stroke-dasharray", d => d.isGap ? "2,2" : "none")
       .attr("id", d => `node-${d.id}`)
       .on("click", (event, d) => {
         event.stopPropagation();
+        if (d.isGap) {
+          app.showToast(`Lỗ hổng kiến thức: ${d.description || 'Chưa được nghiên cứu'}`, 'info');
+          return;
+        }
         app.events.emit('wiki:page-selected', `${d.id}.md`);
       });
 
@@ -1715,6 +1726,7 @@ const GraphManager = {
       .attr("class", "graph-label")
       .attr("dy", d => d.id === 'index' || d.id === 'overview' ? 24 : 18)
       .attr("id", d => `label-${d.id}`)
+      .style("fill", d => d.isGap ? "#C084FC" : "#E2E8F0")
       .text(d => d.label);
 
     // Apply simulation updates on tick
