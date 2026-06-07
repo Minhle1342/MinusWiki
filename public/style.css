@@ -1307,16 +1307,11 @@ body {
   filter: brightness(1.3) drop-shadow(0 0 6px var(--primary));
 }
 
-.graph-node.active {
+.graph-node.active,
+.graph-node.linked-active {
   stroke: white;
   stroke-width: 2.5px;
-  filter: drop-shadow(0 0 10px var(--primary)) brightness(1.2);
-}
-
-.graph-node.connected-active {
-  stroke: rgba(255, 255, 255, 0.8);
-  stroke-width: 2px;
-  filter: drop-shadow(0 0 8px var(--primary-glow)) brightness(1.1);
+  filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.85)) brightness(1.2) !important;
 }
 
 .graph-link {
@@ -1327,10 +1322,10 @@ body {
 }
 
 .graph-link.highlighted {
-  stroke: var(--secondary);
-  stroke-width: 1.8px;
+  stroke: rgba(255, 255, 255, 0.65);
+  stroke-width: 2px;
   stroke-dasharray: none;
-  opacity: 0.8;
+  opacity: 1;
 }
 
 .graph-label {
@@ -1344,16 +1339,12 @@ body {
 }
 
 .graph-node:hover + .graph-label,
-.graph-label.active {
+.graph-label.active,
+.graph-label.linked-active {
   fill: white;
   font-size: 10px;
   font-weight: 600;
-}
-
-.graph-label.connected-active {
-  fill: #E2E8F0;
-  font-size: 9.5px;
-  font-weight: 600;
+  text-shadow: 0 0 4px rgba(255, 255, 255, 0.4);
 }
 
 /* Zoom Widget Controls */

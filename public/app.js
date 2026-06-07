@@ -1803,37 +1803,32 @@ const GraphManager = {
     if (!filename) return;
     const activeId = filename.replace('.md', '');
     
-    // Remove active and connected styles from all nodes and labels
-    this.g.selectAll(".graph-node")
-      .classed("active", false)
-      .classed("connected-active", false);
-    this.g.selectAll(".graph-label")
-      .classed("active", false)
-      .classed("connected-active", false);
-    this.g.selectAll(".graph-link")
-      .classed("highlighted", false);
+    // Remove active styles from all nodes
+    this.g.selectAll(".graph-node").classed("active", false).classed("linked-active", false);
+    this.g.selectAll(".graph-label").classed("active", false).classed("linked-active", false);
+    this.g.selectAll(".graph-link").classed("highlighted", false);
 
-    // Add active styles to the selected node
+    // Add active styles to selected node
     this.g.select(`#node-${activeId}`).classed("active", true);
     this.g.select(`#label-${activeId}`).classed("active", true);
 
-    // Track all connected node IDs and highlight link connections
-    const linkedNodeIds = new Set();
+    // Highlight links connected to this active node and collect neighboring nodes
+    const neighbors = new Set();
     this.g.selectAll(".graph-link").each(function(l) {
-      if (l.source.id === activeId) {
-        linkedNodeIds.add(l.target.id);
+      const sourceId = typeof l.source === 'object' ? l.source.id : l.source;
+      const targetId = typeof l.target === 'object' ? l.target.id : l.target;
+      if (sourceId === activeId || targetId === activeId) {
         d3.select(this).classed("highlighted", true);
-      } else if (l.target.id === activeId) {
-        linkedNodeIds.add(l.source.id);
-        d3.select(this).classed("highlighted", true);
+        neighbors.add(sourceId);
+        neighbors.add(targetId);
       }
     });
 
-    // Add connected-active class to all neighboring nodes & labels
-    linkedNodeIds.forEach(nodeId => {
-      if (nodeId !== activeId) {
-        this.g.select(`#node-${nodeId}`).classed("connected-active", true);
-        this.g.select(`#label-${nodeId}`).classed("connected-active", true);
+    // Make all neighboring nodes glow white
+    neighbors.forEach(nid => {
+      if (nid !== activeId) {
+        this.g.select(`#node-${nid}`).classed("linked-active", true);
+        this.g.select(`#label-${nid}`).classed("linked-active", true);
       }
     });
   }
