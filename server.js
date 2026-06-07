@@ -25,9 +25,10 @@ const PORT = process.env.PORT || 3000;
 // Resolve directories
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const STORAGE_DIR = path.join(__dirname, 'storage');
+const isVercel = process.env.VERCEL || process.env.NOW_REGION;
+const STORAGE_DIR = isVercel ? '/tmp/storage' : path.join(__dirname, 'storage');
 const PROJECTS_DIR = path.join(STORAGE_DIR, 'projects');
-const TMP_DIR = path.join(__dirname, 'tmp');
+const TMP_DIR = isVercel ? '/tmp/tmp' : path.join(__dirname, 'tmp');
 
 // Configuration System (Dynamic API keys via UI)
 const CONFIG_PATH = path.join(STORAGE_DIR, 'config.json');
