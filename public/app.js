@@ -1717,8 +1717,8 @@ const GraphManager = {
       .data(data.links)
       .enter().append("line")
       .attr("class", "graph-link")
-      .style("stroke-dasharray", d => d.isVirtual ? "4,4" : "none")
-      .style("stroke", d => d.isVirtual ? "rgba(168, 85, 247, 0.4)" : "rgba(255, 255, 255, 0.08)");
+      .attr("stroke-dasharray", d => d.isVirtual ? "4,4" : "3,3")
+      .attr("stroke", d => d.isVirtual ? "rgba(168, 85, 247, 0.4)" : "rgba(255, 255, 255, 0.12)");
 
     // Render node groups (wrapper to hold node and text)
     const nodeGroup = this.g.append("g")
@@ -1804,31 +1804,18 @@ const GraphManager = {
     const activeId = filename.replace('.md', '');
     
     // Remove active styles from all nodes
-    this.g.selectAll(".graph-node").classed("active", false).classed("linked-active", false);
-    this.g.selectAll(".graph-label").classed("active", false).classed("linked-active", false);
+    this.g.selectAll(".graph-node").classed("active", false);
+    this.g.selectAll(".graph-label").classed("active", false);
     this.g.selectAll(".graph-link").classed("highlighted", false);
 
-    // Add active styles to selected node
+    // Add active styles
     this.g.select(`#node-${activeId}`).classed("active", true);
     this.g.select(`#label-${activeId}`).classed("active", true);
 
-    // Highlight links connected to this active node and collect neighboring nodes
-    const neighbors = new Set();
+    // Highlight links connected to this active node
     this.g.selectAll(".graph-link").each(function(l) {
-      const sourceId = typeof l.source === 'object' ? l.source.id : l.source;
-      const targetId = typeof l.target === 'object' ? l.target.id : l.target;
-      if (sourceId === activeId || targetId === activeId) {
+      if (l.source.id === activeId || l.target.id === activeId) {
         d3.select(this).classed("highlighted", true);
-        neighbors.add(sourceId);
-        neighbors.add(targetId);
-      }
-    });
-
-    // Make all neighboring nodes glow white
-    neighbors.forEach(nid => {
-      if (nid !== activeId) {
-        this.g.select(`#node-${nid}`).classed("linked-active", true);
-        this.g.select(`#label-${nid}`).classed("linked-active", true);
       }
     });
   }
