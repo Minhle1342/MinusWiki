@@ -1,8 +1,9 @@
 // extension/popup.js
 
-const BACKEND_URL = 'http://localhost:3000';
+let backendUrl = 'http://localhost:3000';
 
 document.addEventListener('DOMContentLoaded', async () => {
+  const serverSelect = document.getElementById('server-select');
   const projectSelect = document.getElementById('project-select');
   const titleInput = document.getElementById('clip-title');
   const textInput = document.getElementById('clip-text');
@@ -32,43 +33,75 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // 2. Fetch projects from local server
-  try {
-    const res = await fetch(`${BACKEND_URL}/api/projects`);
-    if (!res.ok) throw new Error('Cannot load projects');
-    const projects = await res.json();
+  // Function to load projects for the current backendUrl
+  async function loadProjects() {
+    projectSelect.innerHTML = '<option value="" disabled selected>Đang tải dự án...</option>';
+    submitBtn.disabled = true;
+    statusDiv.style.display = 'none';
 
-    if (projects.length === 0) {
-      projectSelect.innerHTML = '<option value="" disabled selected>Chưa có dự án nào. Hãy tạo trên Web UI.</option>';
-      showStatus('Vui lòng mở trang Web MinusWiki và tạo ít nhất 1 dự án!', 'warning');
-      return;
-    }
+    try {
+      const res = await fetch(`${backendUrl}/api/projects`);
+      if (!res.ok) throw new Error('Cannot load projects');
+      const projects = await res.json();
 
-    // Populate dropdown
-    projectSelect.innerHTML = '';
-    projects.forEach(p => {
-      const opt = document.createElement('option');
-      opt.value = p.id;
-      opt.textContent = p.title;
-      projectSelect.appendChild(opt);
-    });
-
-    // Check storage for last selected project
-    chrome.storage.local.get(['currentProjectId'], (result) => {
-      if (result.currentProjectId && projects.some(p => p.id === result.currentProjectId)) {
-        projectSelect.value = result.currentProjectId;
-      } else {
-        // Default to first project
-        projectSelect.value = projects[0].id;
-        saveActiveProjectToStorage(projects[0].id, projects[0].title);
+      if (projects.length === 0) {
+        projectSelect.innerHTML = '<option value="" disabled selected>Chưa có dự án nào. Hãy tạo trên Web UI.</option>';
+        showStatus('Vui lòng mở trang Web MinusWiki và tạo ít nhất 1 dự án!', 'warning');
+        return;
       }
-      submitBtn.disabled = false;
-    });
 
-  } catch (err) {
-    console.error(err);
-    projectSelect.innerHTML = '<option value="" disabled selected>Lỗi kết nối với server.</option>';
-    showStatus('Không thể kết nối với server localhost:3000. Hãy khởi động server node trước!', 'error');
+      // Populate dropdown
+      projectSelect.innerHTML = '';
+      projects.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.title;
+        projectSelect.appendChild(opt);
+      });
+
+      // Check storage for last selected project
+      chrome.storage.local.get(['currentProjectId'], (result) => {
+        if (result.currentProjectId && projects.some(p => p.id === result.currentProjectId)) {
+          projectSelect.value = result.currentProjectId;
+        } else {
+          // Default to first project
+          projectSelect.value = projects[0].id;
+          saveActiveProjectToStorage(projects[0].id, projects[0].title);
+        }
+        submitBtn.disabled = false;
+      });
+
+    } catch (err) {
+      console.error(err);
+      projectSelect.innerHTML = '<option value="" disabled selected>Lỗi kết nối với server.</option>';
+      showStatus(`Không thể kết nối với server ${backendUrl}. Hãy kiểm tra cấu hình hoặc khởi động server!`, 'error');
+    }
+  }
+
+  // Load configured backend URL from storage
+  chrome.storage.local.get(['backendUrl'], async (result) => {
+    if (result.backendUrl) {
+      backendUrl = result.backendUrl;
+      if (serverSelect) {
+        serverSelect.value = backendUrl;
+      }
+    } else {
+      // Default to Localhost in dropdown and save it
+      backendUrl = 'http://localhost:3000';
+      chrome.storage.local.set({ backendUrl: backendUrl });
+    }
+    
+    // Load projects initially
+    await loadProjects();
+  });
+
+  // Handle server select changes
+  if (serverSelect) {
+    serverSelect.addEventListener('change', async () => {
+      backendUrl = serverSelect.value;
+      chrome.storage.local.set({ backendUrl: backendUrl });
+      await loadProjects();
+    });
   }
 
   // Handle project select changes
@@ -96,7 +129,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     showStatus('Đang gửi và biên soạn tri thức...', 'info');
 
     try {
-      const res = await fetch(`${BACKEND_URL}/api/projects/${projectId}/clip`, {
+      const res = await fetch(`${backendUrl}/api/projects/${projectId}/clip`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

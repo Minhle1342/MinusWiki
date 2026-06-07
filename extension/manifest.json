@@ -10,7 +10,8 @@
     "storage"
   ],
   "host_permissions": [
-    "http://localhost:3000/*"
+    "http://localhost:3000/*",
+    "https://minuswiki-production.up.railway.app/*"
   ],
   "background": {
     "service_worker": "background.js"

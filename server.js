@@ -1293,8 +1293,8 @@ async function runIngestPipeline(projectId, sourceName, text) {
  * Query Retrieval Pipeline (4 phases)
  * Searches the wiki pages, synthesizes a reply, and suggests follow-up actions.
  */
-async function runQueryPipeline(projectId, query) {
-  console.log(`Starting Query Pipeline for project ${projectId}, query: "${query}"`);
+async function runQueryPipeline(projectId, query, contextFiles) {
+  console.log(`Starting Query Pipeline for project ${projectId}, query: "${query}", contextFiles:`, contextFiles);
   const wikiDir = path.join(PROJECTS_DIR, projectId, 'wiki');
 
   if (!existsSync(wikiDir)) {
@@ -1304,52 +1304,95 @@ async function runQueryPipeline(projectId, query) {
   // Phase 1: Search / Index Lookup
   const files = await fs.readdir(wikiDir);
   const mdFiles = files.filter(f => f.endsWith('.md') && f !== 'log.md' && f !== 'index.md');
-  const pagesSummary = [];
-
-  for (const file of mdFiles) {
-    const filePath = path.join(wikiDir, file);
-    const content = await fs.readFile(filePath, 'utf-8');
-    const slug = file.replace('.md', '');
-    const firstLines = content.split('\n').slice(0, 5).join(' ');
-    pagesSummary.push({
-      slug,
-      summary: firstLines.substring(0, 200)
-    });
-  }
-
-  // Use LLM to select the most relevant pages
-  const searchSystem = `
-  Bạn là trợ lý tìm kiếm Wiki thông minh bằng tiếng Việt.
-  Dựa trên câu hỏi của người dùng, hãy chọn ra tối đa 5 tệp Wiki (.md) liên quan nhất từ danh sách các trang đang có sẵn.
-  Trả về kết quả dưới dạng JSON duy nhất có cấu trúc:
-  {
-    "relevant_pages": ["slug1.md", "slug2.md"]
-  }
-  Nếu không có trang nào liên quan, trả về mảng rỗng. Không kèm giải thích.
-  `;
-
-  const searchUser = `
-  Câu hỏi người dùng: "${query}"
-
-  Danh sách các trang Wiki hiện có:
-  ${JSON.stringify(pagesSummary, null, 2)}
-  `;
-
+  
   let relevantPages = [];
-  try {
-    const searchResponse = await callLLM(searchSystem, searchUser, true);
-    const parsedSearch = parseLLMJSON(searchResponse);
-    if (parsedSearch && Array.isArray(parsedSearch.relevant_pages)) {
-      relevantPages = parsedSearch.relevant_pages.map(p => p.endsWith('.md') ? p : `${p}.md`);
+
+  if (contextFiles && Array.isArray(contextFiles) && contextFiles.length > 0) {
+    const contextSet = new Set();
+    const normalizedContext = contextFiles.map(f => f.endsWith('.md') ? f : `${f}.md`);
+
+    // Add selected context files themselves
+    normalizedContext.forEach(f => {
+      if (mdFiles.includes(f)) {
+        contextSet.add(f);
+      }
+    });
+
+    // Extract links bidirectionally
+    for (const file of mdFiles) {
+      const filePath = path.join(wikiDir, file);
+      if (existsSync(filePath)) {
+        try {
+          const content = await fs.readFile(filePath, 'utf-8');
+          const isContextFile = normalizedContext.includes(file);
+          const linkRegex = /\[.*?\]\((?:\.\/)?([^)]+?\.md)\)/g;
+          let match;
+          while ((match = linkRegex.exec(content)) !== null) {
+            const targetFilename = match[1];
+
+            // Outgoing link from a context file
+            if (isContextFile && mdFiles.includes(targetFilename)) {
+              contextSet.add(targetFilename);
+            }
+
+            // Incoming link from another file to one of our context files
+            if (!isContextFile && normalizedContext.includes(targetFilename) && mdFiles.includes(file)) {
+              contextSet.add(file);
+            }
+          }
+        } catch (err) {
+          console.error(`Error reading ${file} for link extraction:`, err);
+        }
+      }
     }
-  } catch (err) {
-    console.error('Failed to run LLM search selection:', err);
-    // Simple fallback keyword search
-    relevantPages = mdFiles.filter(file => {
-      const normalizedQuery = query.toLowerCase();
-      const normalizedName = file.replace('.md', '').replace(/_/g, ' ').toLowerCase();
-      return normalizedQuery.includes(normalizedName) || normalizedName.includes(normalizedQuery);
-    }).slice(0, 5);
+    relevantPages = Array.from(contextSet);
+  } else {
+    const pagesSummary = [];
+
+    for (const file of mdFiles) {
+      const filePath = path.join(wikiDir, file);
+      const content = await fs.readFile(filePath, 'utf-8');
+      const slug = file.replace('.md', '');
+      const firstLines = content.split('\n').slice(0, 5).join(' ');
+      pagesSummary.push({
+        slug,
+        summary: firstLines.substring(0, 200)
+      });
+    }
+
+    // Use LLM to select the most relevant pages
+    const searchSystem = `
+    Bạn là trợ lý tìm kiếm Wiki thông minh bằng tiếng Việt.
+    Dựa trên câu hỏi của người dùng, hãy chọn ra tối đa 5 tệp Wiki (.md) liên quan nhất từ danh sách các trang đang có sẵn.
+    Trả về kết quả dưới dạng JSON duy nhất có cấu trúc:
+    {
+      "relevant_pages": ["slug1.md", "slug2.md"]
+    }
+    Nếu không có trang nào liên quan, trả về mảng rỗng. Không kèm giải thích.
+    `;
+
+    const searchUser = `
+    Câu hỏi người dùng: "${query}"
+
+    Danh sách các trang Wiki hiện có:
+    ${JSON.stringify(pagesSummary, null, 2)}
+    `;
+
+    try {
+      const searchResponse = await callLLM(searchSystem, searchUser, true);
+      const parsedSearch = parseLLMJSON(searchResponse);
+      if (parsedSearch && Array.isArray(parsedSearch.relevant_pages)) {
+        relevantPages = parsedSearch.relevant_pages.map(p => p.endsWith('.md') ? p : `${p}.md`);
+      }
+    } catch (err) {
+      console.error('Failed to run LLM search selection:', err);
+      // Simple fallback keyword search
+      relevantPages = mdFiles.filter(file => {
+        const normalizedQuery = query.toLowerCase();
+        const normalizedName = file.replace('.md', '').replace(/_/g, ' ').toLowerCase();
+        return normalizedQuery.includes(normalizedName) || normalizedName.includes(normalizedQuery);
+      }).slice(0, 5);
+    }
   }
 
   // Always include index.md and overview.md for general context if no pages found
@@ -2080,14 +2123,14 @@ app.delete('/api/projects/:id/wiki/:filename', async (req, res) => {
  */
 app.post('/api/projects/:id/query', async (req, res) => {
   const { id } = req.params;
-  const { query } = req.body;
+  const { query, contextFiles } = req.body;
 
   if (!query) {
     return res.status(400).json({ error: 'Query parameter is required' });
   }
 
   try {
-    const result = await runQueryPipeline(id, query);
+    const result = await runQueryPipeline(id, query, contextFiles);
     res.json(result);
   } catch (error) {
     console.error('Error processing query:', error);

@@ -396,7 +396,10 @@
 
               <!-- Message Input Form -->
               <form id="chat-form" class="chat-input-form">
-                <input type="text" id="chat-input" placeholder="Hỏi gì đó về tài liệu nguồn..." class="glass-input" autocomplete="off">
+                <div class="chat-input-wrapper glass-input" id="chat-input-wrapper">
+                  <div id="chat-context-tags" class="chat-context-tags" style="display: none;"></div>
+                  <input type="text" id="chat-input" placeholder="Hỏi gì đó về tài liệu nguồn..." autocomplete="off">
+                </div>
                 <button type="submit" id="btn-chat-send" class="btn btn-primary btn-icon">
                   <i data-lucide="send"></i>
                 </button>

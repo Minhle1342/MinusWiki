@@ -776,17 +776,18 @@ const WikiTreeManager = {
       const li = document.createElement('li');
       li.className = `wiki-item ${app.state.currentWikiFilename === page.filename ? 'active' : ''}`;
       li.dataset.filename = page.filename;
+      li.setAttribute('draggable', 'true');
       
       let icon = 'file-text';
       if (page.filename === 'index.md') icon = 'book-open';
       if (page.filename === 'overview.md') icon = 'home';
       if (page.filename === 'log.md') icon = 'history';
-
+ 
       // Format timestamp nicely
       const dateStr = new Date(page.updatedAt).toLocaleDateString('vi-VN', {
         month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit'
       });
-
+ 
       const titleClass = page.hasContradiction ? 'wiki-item-title has-contradiction' : 'wiki-item-title';
       li.innerHTML = `
         <span class="${titleClass}">
@@ -798,6 +799,12 @@ const WikiTreeManager = {
       
       li.addEventListener('click', () => {
         app.events.emit('wiki:page-selected', page.filename);
+      });
+
+      li.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('text/plain', page.filename);
+        e.dataTransfer.setData('application/json', JSON.stringify({ filename: page.filename, title: page.title }));
+        e.dataTransfer.effectAllowed = 'copyMove';
       });
       
       this.pagesListEl.appendChild(li);
@@ -1831,6 +1838,9 @@ const ChatManager = {
     this.chatThread = document.getElementById('chat-thread');
     this.suggestionsContainer = document.getElementById('chat-suggestions');
     this.chatTabBtn = document.getElementById('tab-btn-chat');
+    this.chatInputWrapper = document.getElementById('chat-input-wrapper');
+    this.contextTagsContainer = document.getElementById('chat-context-tags');
+    this.selectedContextFiles = [];
     
     // Form trigger
     this.chatForm.addEventListener('submit', (e) => {
@@ -1848,11 +1858,93 @@ const ChatManager = {
       }
     });
 
+    // Drag & Drop event handling for chat input container
+    if (this.chatInputWrapper) {
+      this.chatInputWrapper.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        this.chatInputWrapper.classList.add('drag-over');
+      });
+
+      this.chatInputWrapper.addEventListener('dragleave', () => {
+        this.chatInputWrapper.classList.remove('drag-over');
+      });
+
+      this.chatInputWrapper.addEventListener('drop', (e) => {
+        e.preventDefault();
+        this.chatInputWrapper.classList.remove('drag-over');
+        
+        try {
+          const jsonStr = e.dataTransfer.getData('application/json');
+          if (jsonStr) {
+            const data = JSON.parse(jsonStr);
+            if (data && data.filename) {
+              this.addContextFile(data);
+            }
+          } else {
+            const filename = e.dataTransfer.getData('text/plain');
+            if (filename && filename.endsWith('.md')) {
+              const title = filename.replace('.md', '').replace(/_/g, ' ');
+              this.addContextFile({ filename, title });
+            }
+          }
+        } catch (err) {
+          console.error('Error handling wiki-item drop:', err);
+        }
+      });
+    }
+
     // Subscriptions
     app.events.on('project:changed', () => this.clearChatHistory());
   },
 
+  addContextFile(fileObj) {
+    const exists = this.selectedContextFiles.some(f => f.filename === fileObj.filename);
+    if (!exists) {
+      this.selectedContextFiles.push(fileObj);
+      this.renderContextTags();
+    }
+  },
+
+  removeContextFile(filename) {
+    this.selectedContextFiles = this.selectedContextFiles.filter(f => f.filename !== filename);
+    this.renderContextTags();
+  },
+
+  renderContextTags() {
+    if (!this.contextTagsContainer) return;
+    this.contextTagsContainer.innerHTML = '';
+    
+    if (this.selectedContextFiles.length === 0) {
+      this.contextTagsContainer.style.display = 'none';
+      return;
+    }
+    
+    this.contextTagsContainer.style.display = 'flex';
+    this.selectedContextFiles.forEach(file => {
+      const tag = document.createElement('div');
+      tag.className = 'chat-context-tag';
+      tag.innerHTML = `
+        <i data-lucide="file-text" style="width: 12px; height: 12px;"></i>
+        <span>${file.title}</span>
+        <button type="button" class="btn-remove-tag" title="Xóa ngữ cảnh">
+          <i data-lucide="x" style="width: 10px; height: 10px;"></i>
+        </button>
+      `;
+      
+      tag.querySelector('.btn-remove-tag').addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.removeContextFile(file.filename);
+      });
+      
+      this.contextTagsContainer.appendChild(tag);
+    });
+    
+    lucide.createIcons();
+  },
+
   clearChatHistory() {
+    this.selectedContextFiles = [];
+    this.renderContextTags();
     this.chatThread.innerHTML = `
       <div class="chat-message assistant">
         <div class="message-avatar">
@@ -1992,7 +2084,10 @@ const ChatManager = {
       const res = await fetch(`/api/projects/${projId}/query`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: queryText })
+        body: JSON.stringify({
+          query: queryText,
+          contextFiles: this.selectedContextFiles.map(f => f.filename)
+        })
       });
 
       this.showTypingIndicator(false);

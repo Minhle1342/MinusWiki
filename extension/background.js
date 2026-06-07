@@ -17,18 +17,19 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     const url = tab.url;
     const title = tab.title || "Trang web";
 
-    // Retrieve the active project ID from storage
-    chrome.storage.local.get(["currentProjectId", "currentProjectTitle"], async (result) => {
+    // Retrieve the active project ID and backendUrl from storage
+    chrome.storage.local.get(["currentProjectId", "currentProjectTitle", "backendUrl"], async (result) => {
       const projectId = result.currentProjectId;
       if (!projectId) {
         console.warn("No active project configured in extension storage.");
         return;
       }
 
-      console.log(`Clipping text to project "${result.currentProjectTitle || projectId}"`);
+      const serverUrl = result.backendUrl || "http://localhost:3000";
+      console.log(`Clipping text to project "${result.currentProjectTitle || projectId}" via server ${serverUrl}`);
       
       try {
-        const res = await fetch(`http://localhost:3000/api/projects/${projectId}/clip`, {
+        const res = await fetch(`${serverUrl}/api/projects/${projectId}/clip`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -46,7 +47,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
         const data = await res.json();
         console.log("Clipped data successfully processed:", data);
       } catch (err) {
-        console.error("Failed to send clip to local MinusWiki server:", err);
+        console.error(`Failed to send clip to MinusWiki server at ${serverUrl}:`, err);
       }
     });
   }
