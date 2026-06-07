@@ -2289,6 +2289,195 @@ app.get('/api/projects/:id/maintenance', async (req, res) => {
 });
 
 /**
+ * POST /api/projects/:id/wiki/auto-link
+ * Automatically link an orphan page from suggested target pages
+ */
+app.post('/api/projects/:id/wiki/auto-link', async (req, res) => {
+  const { id } = req.params;
+  const { orphanFilename, orphanTitle, suggestions } = req.body;
+  const wikiDir = path.join(PROJECTS_DIR, id, 'wiki');
+
+  if (!existsSync(wikiDir)) {
+    return res.status(404).json({ error: 'Wiki directory not found' });
+  }
+
+  if (!orphanFilename || !suggestions || !Array.isArray(suggestions) || suggestions.length === 0) {
+    return res.status(400).json({ error: 'Missing required parameters' });
+  }
+
+  try {
+    const updatedTargets = [];
+    for (const sug of suggestions) {
+      const targetFilename = sug.target;
+      const reason = sug.reason;
+      if (!targetFilename) continue;
+
+      const targetPath = path.join(wikiDir, targetFilename);
+      if (!existsSync(targetPath)) continue;
+
+      let rawContent = await fs.readFile(targetPath, 'utf-8');
+      const { frontmatter, content } = parseFrontmatter(rawContent);
+      
+      // Check if target page already links to the orphan page (case insensitive check for filename)
+      const orphanBase = orphanFilename.toLowerCase();
+      if (content.toLowerCase().includes(orphanBase)) {
+        continue; // already linked
+      }
+
+      // Check if "Xem thêm" or "Liên kết" exists in content
+      const seeAlsoRegex = /^(#{2,4})\s+(Xem thêm|Liên kết|Tài liệu liên quan|Tham khảo)\b/im;
+      const match = content.match(seeAlsoRegex);
+      
+      let newContent;
+      if (match) {
+        // Find the index in content
+        const headerText = match[0];
+        const headerIndex = content.indexOf(headerText);
+        const nextLineIndex = content.indexOf('\n', headerIndex);
+        
+        let insertIndex = nextLineIndex;
+        if (nextLineIndex === -1) {
+          insertIndex = content.length;
+        }
+
+        const linkLine = `\n- [${orphanTitle}](./${orphanFilename}) — ${reason}`;
+        newContent = content.slice(0, insertIndex) + linkLine + content.slice(insertIndex);
+      } else {
+        // Ensure nice spacing
+        let suffix = '';
+        if (!content.endsWith('\n')) {
+          suffix += '\n';
+        }
+        suffix += `\n### Xem thêm\n- [${orphanTitle}](./${orphanFilename}) — ${reason}\n`;
+        newContent = content + suffix;
+      }
+      
+      const finalPageContent = stringifyFrontmatter(frontmatter, newContent);
+      await fs.writeFile(targetPath, finalPageContent, 'utf-8');
+      updatedTargets.push(targetFilename);
+
+      // Log to log.md
+      try {
+        const logFilePath = path.join(wikiDir, 'log.md');
+        const timestamp = new Date().toISOString();
+        const targetCleanName = targetFilename.replace('.md', '').replace(/_/g, ' ');
+        await fs.appendFile(
+          logFilePath,
+          `\n- [${timestamp}] Đã tạo liên kết tự động từ [${targetCleanName}](${targetFilename}) tới trang mồ côi [${orphanTitle}](${orphanFilename})\n`
+        );
+      } catch (err) {
+        console.error('Failed to append to log.md in auto-link:', err);
+      }
+    }
+
+    res.json({ success: true, message: 'Đã tự động liên kết thành công!', updatedTargets });
+  } catch (error) {
+    console.error('Error in auto-linking:', error);
+    res.status(500).json({ error: 'Failed to auto-link pages' });
+  }
+});
+
+/**
+ * POST /api/projects/:id/wiki/auto-link-all
+ * Automatically link ALL orphan pages using their AI suggestions
+ */
+app.post('/api/projects/:id/wiki/auto-link-all', async (req, res) => {
+  const { id } = req.params;
+  const { orphans } = req.body;
+  const wikiDir = path.join(PROJECTS_DIR, id, 'wiki');
+
+  if (!existsSync(wikiDir)) {
+    return res.status(404).json({ error: 'Wiki directory not found' });
+  }
+
+  if (!orphans || !Array.isArray(orphans) || orphans.length === 0) {
+    return res.status(400).json({ error: 'Missing required parameters' });
+  }
+
+  try {
+    const updatedTargets = [];
+    const logFilePath = path.join(wikiDir, 'log.md');
+    const timestamp = new Date().toISOString();
+
+    for (const orph of orphans) {
+      const { filename: orphanFilename, title: orphanTitle, suggestions } = orph;
+      if (!orphanFilename || !suggestions || !Array.isArray(suggestions) || suggestions.length === 0) {
+        continue;
+      }
+
+      for (const sug of suggestions) {
+        const targetFilename = sug.target;
+        const reason = sug.reason;
+        if (!targetFilename) continue;
+
+        const targetPath = path.join(wikiDir, targetFilename);
+        if (!existsSync(targetPath)) continue;
+
+        let rawContent = await fs.readFile(targetPath, 'utf-8');
+        const { frontmatter, content } = parseFrontmatter(rawContent);
+
+        // Check if target page already links to the orphan page (case insensitive check for filename)
+        const orphanBase = orphanFilename.toLowerCase();
+        if (content.toLowerCase().includes(orphanBase)) {
+          continue; // already linked
+        }
+
+        // Check if "Xem thêm" or "Liên kết" exists in content
+        const seeAlsoRegex = /^(#{2,4})\s+(Xem thêm|Liên kết|Tài liệu liên quan|Tham khảo)\b/im;
+        const match = content.match(seeAlsoRegex);
+
+        let newContent;
+        if (match) {
+          // Find the index in content
+          const headerText = match[0];
+          const headerIndex = content.indexOf(headerText);
+          const nextLineIndex = content.indexOf('\n', headerIndex);
+
+          let insertIndex = nextLineIndex;
+          if (nextLineIndex === -1) {
+            insertIndex = content.length;
+          }
+
+          const linkLine = `\n- [${orphanTitle}](./${orphanFilename}) — ${reason}`;
+          newContent = content.slice(0, insertIndex) + linkLine + content.slice(insertIndex);
+        } else {
+          // Ensure nice spacing
+          let suffix = '';
+          if (!content.endsWith('\n')) {
+            suffix += '\n';
+          }
+          suffix += `\n### Xem thêm\n- [${orphanTitle}](./${orphanFilename}) — ${reason}\n`;
+          newContent = content + suffix;
+        }
+
+        const finalPageContent = stringifyFrontmatter(frontmatter, newContent);
+        await fs.writeFile(targetPath, finalPageContent, 'utf-8');
+        if (!updatedTargets.includes(targetFilename)) {
+          updatedTargets.push(targetFilename);
+        }
+
+        // Log to log.md
+        try {
+          const targetCleanName = targetFilename.replace('.md', '').replace(/_/g, ' ');
+          await fs.appendFile(
+            logFilePath,
+            `\n- [${timestamp}] Đã tạo liên kết tự động từ [${targetCleanName}](${targetFilename}) tới trang mồ côi [${orphanTitle}](${orphanFilename})\n`
+          );
+        } catch (err) {
+          console.error('Failed to append to log.md in auto-link-all:', err);
+        }
+      }
+    }
+
+    res.json({ success: true, message: 'Đã tự động liên kết tất cả trang mồ côi thành công!', updatedTargets });
+  } catch (error) {
+    console.error('Error in auto-linking all:', error);
+    res.status(500).json({ error: 'Failed to auto-link all pages' });
+  }
+});
+
+/**
+
  * GET /api/config
  * Get app configurations (LLM provider, models, and keys)
  */

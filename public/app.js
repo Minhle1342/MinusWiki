@@ -407,6 +407,7 @@ const WikiTreeManager = {
     // Maintenance elements
     this.runMaintenanceBtn = document.getElementById('btn-run-maintenance');
     this.orphanPagesList = document.getElementById('orphan-pages-list');
+    this.autoLinkAllBtn = document.getElementById('auto-link-all-btn');
     this.gapsList = document.getElementById('gaps-list');
     this.contradictionsList = document.getElementById('contradictions-list');
 
@@ -447,6 +448,9 @@ const WikiTreeManager = {
 
     if (this.runMaintenanceBtn) {
       this.runMaintenanceBtn.addEventListener('click', () => this.runWikiMaintenance());
+    }
+    if (this.autoLinkAllBtn) {
+      this.autoLinkAllBtn.addEventListener('click', () => this.autoLinkAllOrphans());
     }
     
     // Sidebar Tabs navigation
@@ -1147,8 +1151,10 @@ const WikiTreeManager = {
       const data = await res.json();
 
       // Render Orphans
+      this.currentOrphans = data.orphans || [];
       this.orphanPagesList.innerHTML = '';
-      if (!data.orphans || data.orphans.length === 0) {
+      if (this.currentOrphans.length === 0) {
+        if (this.autoLinkAllBtn) this.autoLinkAllBtn.classList.add('hidden');
         this.orphanPagesList.innerHTML = `
           <li class="empty-state">
             <i data-lucide="check-circle" style="color: var(--success); width: 16px; height: 16px;"></i>
@@ -1156,6 +1162,14 @@ const WikiTreeManager = {
           </li>
         `;
       } else {
+        const hasAnySuggestions = this.currentOrphans.some(o => o.suggestions && o.suggestions.length > 0);
+        if (this.autoLinkAllBtn) {
+          if (hasAnySuggestions) {
+            this.autoLinkAllBtn.classList.remove('hidden');
+          } else {
+            this.autoLinkAllBtn.classList.add('hidden');
+          }
+        }
         data.orphans.forEach(orph => {
           const li = document.createElement('li');
           li.className = 'maintenance-item';
@@ -1260,6 +1274,62 @@ const WikiTreeManager = {
     } finally {
       this.runMaintenanceBtn.disabled = false;
       this.runMaintenanceBtn.innerHTML = originalHtml;
+      lucide.createIcons();
+    }
+  },
+
+  async autoLinkAllOrphans() {
+    const projId = app.state.currentProjectId;
+    if (!projId) {
+      app.showToast('Vui lòng chọn dự án trước.', 'warning');
+      return;
+    }
+
+    if (!this.currentOrphans || this.currentOrphans.length === 0) {
+      app.showToast('Không có trang mồ côi nào để liên kết.', 'info');
+      return;
+    }
+
+    const orphansWithSuggestions = this.currentOrphans.filter(o => o.suggestions && o.suggestions.length > 0);
+    if (orphansWithSuggestions.length === 0) {
+      app.showToast('Không có đề xuất kết nối AI nào cho các trang mồ côi hiện tại.', 'info');
+      return;
+    }
+
+    const originalHtml = this.autoLinkAllBtn.innerHTML;
+    this.autoLinkAllBtn.disabled = true;
+    this.autoLinkAllBtn.innerHTML = '<i data-lucide="loader" class="animate-spin" style="width: 12px; height: 12px;"></i><span>Đang liên kết...</span>';
+    lucide.createIcons();
+
+    try {
+      const res = await fetch(`/api/projects/${projId}/wiki/auto-link-all`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orphans: orphansWithSuggestions })
+      });
+
+      if (!res.ok) {
+        throw new Error('Auto-link all failed');
+      }
+
+      const result = await res.json();
+      app.showToast(result.message || 'Đã tự động liên kết tất cả thành công!', 'success');
+      
+      // Refresh sidebar list to update link statuses
+      const projRes = await fetch(`/api/projects/${projId}`);
+      if (projRes.ok) {
+        const data = await projRes.json();
+        this.renderPagesList(data.pages);
+      }
+
+      // Re-run wiki maintenance silently to update the UI list
+      await this.runWikiMaintenance(true);
+    } catch (err) {
+      console.error(err);
+      app.showToast('Có lỗi xảy ra khi tự động liên kết.', 'error');
+    } finally {
+      this.autoLinkAllBtn.disabled = false;
+      this.autoLinkAllBtn.innerHTML = originalHtml;
       lucide.createIcons();
     }
   }

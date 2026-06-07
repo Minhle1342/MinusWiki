@@ -190,11 +190,16 @@
             </div>
 
             <div class="maintenance-scroll-area" style="padding: 0 15px; overflow-y: auto; max-height: calc(100vh - 280px);">
-              <!-- Orphan Pages Section -->
               <div class="maintenance-section">
-                <h4 class="maintenance-sec-title" style="display: flex; align-items: center; gap: 8px; color: var(--text-color); margin-bottom: 10px; font-size: 14px; font-weight: 600;">
-                  <i data-lucide="link-2-off" style="color: var(--primary-color); width: 16px; height: 16px;"></i>
-                  <span>Trang mồ côi (Orphans)</span>
+                <h4 class="maintenance-sec-title" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text-color); margin-bottom: 10px; font-size: 14px; font-weight: 600; width: 100%;">
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <i data-lucide="link-2-off" style="color: var(--primary-color); width: 16px; height: 16px;"></i>
+                    <span>Trang mồ côi (Orphans)</span>
+                  </div>
+                  <button id="auto-link-all-btn" class="hidden" style="font-size: 11px; padding: 2px 8px; height: 24px; border-radius: 4px; display: flex; align-items: center; gap: 4px; background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); cursor: pointer; transition: all 0.2s;">
+                    <i data-lucide="wand-2" style="width: 12px; height: 12px;"></i>
+                    <span>Liên kết tất cả (AI)</span>
+                  </button>
                 </h4>
                 <ul id="orphan-pages-list" class="sources-list">
                   <li class="empty-state">
