@@ -735,8 +735,10 @@ const WikiTreeManager = {
         }
       }
 
-      // Automatically run silent maintenance scan to find orphans, gaps & contradictions
-      this.runWikiMaintenance(true);
+      // Automatically run silent maintenance scan if auto maintenance mode is enabled
+      if (this.autoMaintenanceMode) {
+        this.runWikiMaintenance(true);
+      }
     } catch (err) {
       console.error(err);
       app.showToast('Lỗi khi tải tri thức dự án.', 'error');
