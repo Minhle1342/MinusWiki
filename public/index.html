@@ -103,7 +103,7 @@
               <i data-lucide="search" class="search-icon"></i>
             </div>
             
-            <div class="wiki-tree-container">
+            <div class="wiki-tree-container px-3">
               <ul id="wiki-page-list" class="wiki-list">
                 <li class="empty-state">
                   <i data-lucide="folder-open"></i>
@@ -130,6 +130,19 @@
                 <p class="dropzone-subtitle">Hỗ trợ PDF, DOCX, XLSX, TXT, MD</p>
                 <span class="btn btn-secondary btn-sm">Chọn tệp</span>
               </div>
+            </div>
+
+            <!-- Google Drive Upload Trigger -->
+            <div style="display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 12px; margin-bottom: 12px;">
+              <span style="font-size: 12px; color: var(--text-muted);">Hoặc nạp từ:</span>
+              <button type="button" id="google-drive-trigger-btn" class="btn btn-secondary btn-sm" style="background: rgba(15, 157, 88, 0.15); color: #10b981; border: 1px solid rgba(15, 157, 88, 0.3); display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; height: 28px; cursor: pointer; border-radius: 4px; font-weight: 500;">
+                <svg width="14" height="14" viewBox="0 0 87.3 78" style="vertical-align: middle;">
+                  <path d="M6.2 78l15.5-27.7 27.7-48L34 2.3 0 61.3z" fill="#0066da"/>
+                  <path d="M29.5 50.3h57.8l-15.3-26.6H44.8z" fill="#ffcd42"/>
+                  <path d="M49.4 50.3L34 22.7 61.7 22.7l15.3 26.6z" fill="#00a85d"/>
+                </svg>
+                <span>Google Drive</span>
+              </button>
             </div>
 
             <!-- Upload Progress Info -->
@@ -455,6 +468,18 @@
           </div>
         </div>
 
+        <div style="border-top: 1px solid var(--border-color); margin-top: 15px; padding-top: 15px;">
+          <h4 style="font-size: 13px; font-weight: 600; margin-bottom: 10px; color: var(--text-color);">Cấu hình Google Drive (Không bắt buộc)</h4>
+          <div class="form-group">
+            <label for="settings-google-key">Google API Key</label>
+            <input type="password" id="settings-google-key" placeholder="Nhập Google API Key..." class="glass-input">
+          </div>
+          <div class="form-group">
+            <label for="settings-google-client">Google Client ID</label>
+            <input type="text" id="settings-google-client" placeholder="Nhập Google Client ID..." class="glass-input">
+          </div>
+        </div>
+
         <div class="modal-footer">
           <button type="button" class="btn btn-secondary" id="btn-cancel-settings">Hủy bỏ</button>
           <button type="submit" class="btn btn-primary">Lưu cấu hình</button>
@@ -462,6 +487,51 @@
       </form>
     </div>
   </div>
+
+  <!-- Google Drive Modal -->
+  <div class="modal hidden" id="google-drive-modal">
+    <div class="modal-content glass-effect" style="max-width: 500px;">
+      <div class="modal-header">
+        <h3 class="modal-title">
+          <i data-lucide="chrome" style="color: #10b981; vertical-align: middle; margin-right: 6px;"></i>
+          Nạp tài liệu từ Google Drive
+        </h3>
+        <button type="button" class="btn-close" id="btn-close-google-modal">&times;</button>
+      </div>
+      <div class="modal-body" style="padding: 20px;">
+        <div class="tab-container" style="margin-bottom: 20px;">
+          <!-- Option A: Share Link -->
+          <div style="margin-bottom: 20px; border-bottom: 1px solid var(--border-color); padding-bottom: 20px;">
+            <h4 style="font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--text-color);">Cách 1: Sử dụng liên kết chia sẻ công khai</h4>
+            <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">Đảm bảo tệp đã được thiết lập quyền "Bất kỳ ai có liên kết đều có thể xem" (Anyone with link can view).</p>
+            <div class="form-group" style="margin-bottom: 12px;">
+              <label for="google-share-link">Đường dẫn Google Drive</label>
+              <input type="text" id="google-share-link" placeholder="https://docs.google.com/document/d/.../edit" class="glass-input">
+            </div>
+            <button type="button" id="btn-import-google-link" class="btn btn-primary btn-sm" style="width: 100%;">Nạp tài liệu</button>
+          </div>
+
+          <!-- Option B: Google Picker -->
+          <div>
+            <h4 style="font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--text-color);">Cách 2: Chọn từ tài khoản Google của bạn</h4>
+            <p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">Chọn tệp trực tiếp từ Google Drive của bạn (Yêu cầu cấu hình Client ID & API Key trong Cài đặt).</p>
+            <button type="button" id="btn-open-google-picker" class="btn btn-secondary btn-sm" style="width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; background: rgba(15, 157, 88, 0.1); border-color: rgba(15, 157, 88, 0.2); color: #10b981;">
+              <svg width="14" height="14" viewBox="0 0 87.3 78" style="vertical-align: middle;">
+                <path d="M6.2 78l15.5-27.7 27.7-48L34 2.3 0 61.3z" fill="#0066da"/>
+                <path d="M29.5 50.3h57.8l-15.3-26.6H44.8z" fill="#ffcd42"/>
+                <path d="M49.4 50.3L34 22.7 61.7 22.7l15.3 26.6z" fill="#00a85d"/>
+              </svg>
+              <span>Mở Google Drive Picker</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Google API SDKs -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="https://apis.google.com/js/api.js" async defer></script>
 
   <!-- Script to run Lucide Icons -->
   <script>

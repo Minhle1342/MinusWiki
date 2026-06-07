@@ -39,7 +39,9 @@ let appConfig = {
   GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite-preview',
   OPENAI_API_KEY: process.env.OPENAI_API_KEY || '',
   OPENAI_MODEL: process.env.OPENAI_MODEL || 'DeepSeek-V4-Flash',
-  OPENAI_API_BASE: process.env.OPENAI_API_BASE || 'https://api.deepseek.com'
+  OPENAI_API_BASE: process.env.OPENAI_API_BASE || 'https://api.deepseek.com',
+  GOOGLE_API_KEY: process.env.GOOGLE_API_KEY || '',
+  GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || ''
 };
 
 async function loadConfig() {
@@ -1557,7 +1559,7 @@ Hệ thống này đóng vai trò là một "Kiến trúc sư tri thức chủ �
 - **Danh sách lồng nhau:** Sử dụng dấu gạch đầu dòng (\`-\`) cho danh sách không thứ tự và số (\`1.\`) cho quy trình tuần tự. Danh sách lồng nhau phải thụt lề đúng 4 khoảng trắng (spaces).
 
 ## 3. Quản lý Liên kết chéo (Wikilinks & Terminology)
-- Chỉ áp dụng tính năng liên kết chéo dạng \`[[Tên_Khái_Niệm]]\` cho các từ khóa quan trọng, thuật ngữ chuyên ngành, hoặc thực thể (Entity) xuất hiện lần đầu tiên trong bài văn. KHÔNG liên kết vô tội vạ các từ ngữ thông thường.
+- Chỉ áp dụng tính năng liên kết chéo dạng \`Tên_Khái_Niệm\` cho các từ khóa quan trọng, thuật ngữ chuyên ngành, hoặc thực thể (Entity) xuất hiện lần đầu tiên trong bài văn. KHÔNG liên kết vô tội vạ các từ ngữ thông thường.
 - **Giữ nguyên thuật ngữ chuyên ngành:** Giữ nguyên các thuật ngữ tiếng Anh kỹ thuật gốc (ví dụ: *Context Window*, *Caching*, *Full-stack*) nếu việc dịch sang tiếng Việt làm tối nghĩa hoặc mất đi tính chuẩn xác của ngành.
 
 ## 4. Kiểm soát Đầu ra Sạch (Clean Output Control)
@@ -1699,6 +1701,122 @@ app.post('/api/projects/:id/upload', upload.array('files'), async (req, res) => 
   } catch (error) {
     console.error('Error handling upload:', error);
     res.status(500).json({ error: `Upload processing failed: ${error.message}` });
+  }
+});
+
+/**
+ * POST /api/projects/:id/upload/google-drive
+ * Handle uploading files from Google Drive by URL or Picker
+ */
+app.post('/api/projects/:id/upload/google-drive', async (req, res) => {
+  const { id } = req.params;
+  const { url, fileId, name, mimeType, accessToken } = req.body;
+  const projectPath = path.join(PROJECTS_DIR, id);
+
+  if (!existsSync(projectPath)) {
+    return res.status(404).json({ error: 'Project not found' });
+  }
+
+  try {
+    let finalFilename = name || '';
+    let finalBuffer;
+
+    if (accessToken && fileId) {
+      // Method 1: Google Picker API with OAuth Access Token
+      console.log(`Downloading from Google Drive API: ${fileId} (${name}, ${mimeType})`);
+      let downloadUrl = '';
+
+      if (mimeType === 'application/vnd.google-apps.document') {
+        downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/vnd.openxmlformats-officedocument.wordprocessingml.document`;
+        if (!finalFilename.toLowerCase().endsWith('.docx')) finalFilename += '.docx';
+      } else if (mimeType === 'application/vnd.google-apps.spreadsheet') {
+        downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`;
+        if (!finalFilename.toLowerCase().endsWith('.xlsx')) finalFilename += '.xlsx';
+      } else if (mimeType === 'application/vnd.google-apps.presentation') {
+        downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/pdf`;
+        if (!finalFilename.toLowerCase().endsWith('.pdf')) finalFilename += '.pdf';
+      } else {
+        downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
+      }
+
+      const response = await fetch(downloadUrl, {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`
+        }
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Google API returned status ${response.status}: ${errText}`);
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      finalBuffer = Buffer.from(arrayBuffer);
+    } else if (url) {
+      // Method 2: Public Share Link
+      const driveMatch = url.match(/\/d\/([a-zA-Z0-9-_]+)/) || url.match(/[?&]id=([a-zA-Z0-9-_]+)/);
+      if (!driveMatch) {
+        return res.status(400).json({ error: 'Đường dẫn Google Drive không hợp lệ hoặc không trích xuất được File ID.' });
+      }
+      const extractedId = driveMatch[1];
+      console.log(`Downloading from Google Drive share link. File ID: ${extractedId}`);
+
+      let downloadUrl = '';
+      if (url.includes('/document/')) {
+        downloadUrl = `https://docs.google.com/document/d/${extractedId}/export?format=docx`;
+        finalFilename = finalFilename || `google_doc_${extractedId}.docx`;
+        if (!finalFilename.toLowerCase().endsWith('.docx')) finalFilename += '.docx';
+      } else if (url.includes('/spreadsheets/')) {
+        downloadUrl = `https://docs.google.com/spreadsheets/d/${extractedId}/export?format=xlsx`;
+        finalFilename = finalFilename || `google_sheet_${extractedId}.xlsx`;
+        if (!finalFilename.toLowerCase().endsWith('.xlsx')) finalFilename += '.xlsx';
+      } else if (url.includes('/presentation/')) {
+        downloadUrl = `https://docs.google.com/presentation/d/${extractedId}/export?format=pdf`;
+        finalFilename = finalFilename || `google_presentation_${extractedId}.pdf`;
+        if (!finalFilename.toLowerCase().endsWith('.pdf')) finalFilename += '.pdf';
+      } else {
+        downloadUrl = `https://docs.google.com/uc?export=download&id=${extractedId}`;
+        finalFilename = finalFilename || `google_file_${extractedId}`;
+      }
+
+      const response = await fetch(downloadUrl);
+      if (!response.ok) {
+        throw new Error(`Google download returned status ${response.status}`);
+      }
+
+      // Try to read content-disposition header for filename
+      const contentDisposition = response.headers.get('content-disposition');
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="?([^";]+)"?/);
+        if (filenameMatch) {
+          finalFilename = filenameMatch[1];
+        }
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      finalBuffer = Buffer.from(arrayBuffer);
+    } else {
+      return res.status(400).json({ error: 'Thiếu thông tin Google Drive URL hoặc File ID & Access Token.' });
+    }
+
+    // Sanitize filename
+    finalFilename = finalFilename.replace(/[\/\\?%*:|"<>]/g, '_');
+
+    // Save buffer to file in project's sources directory
+    const finalPath = path.join(projectPath, 'sources', finalFilename);
+    await fs.writeFile(finalPath, finalBuffer);
+
+    // Add to ingestion queue
+    await ingestQueue.addTask(id, finalFilename, finalPath);
+
+    res.json({
+      success: true,
+      filename: finalFilename,
+      message: 'Đã tải tệp từ Google Drive thành công và đưa vào hàng đợi xử lý.'
+    });
+  } catch (error) {
+    console.error('Lỗi khi tải từ Google Drive:', error);
+    res.status(500).json({ error: `Tải từ Google Drive thất bại: ${error.message}` });
   }
 });
 
@@ -2497,7 +2615,9 @@ app.post('/api/config', async (req, res) => {
       GEMINI_MODEL,
       OPENAI_API_KEY,
       OPENAI_MODEL,
-      OPENAI_API_BASE
+      OPENAI_API_BASE,
+      GOOGLE_API_KEY,
+      GOOGLE_CLIENT_ID
     } = req.body;
 
     await saveConfig({
@@ -2506,7 +2626,9 @@ app.post('/api/config', async (req, res) => {
       GEMINI_MODEL: GEMINI_MODEL || 'gemini-3.1-flash-lite-preview',
       OPENAI_API_KEY: OPENAI_API_KEY || '',
       OPENAI_MODEL: OPENAI_MODEL || 'DeepSeek-V4-Flash',
-      OPENAI_API_BASE: OPENAI_API_BASE || 'https://api.deepseek.com'
+      OPENAI_API_BASE: OPENAI_API_BASE || 'https://api.deepseek.com',
+      GOOGLE_API_KEY: GOOGLE_API_KEY || '',
+      GOOGLE_CLIENT_ID: GOOGLE_CLIENT_ID || ''
     });
 
     res.json({ success: true, message: 'Cấu hình đã được lưu thành công!', config: appConfig });

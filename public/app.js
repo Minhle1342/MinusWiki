@@ -253,6 +253,9 @@ const SettingsManager = {
     this.openaiKeyInput = document.getElementById('settings-openai-key');
     this.openaiModelInput = document.getElementById('settings-openai-model');
     this.openaiBaseInput = document.getElementById('settings-openai-base');
+
+    this.googleKeyInput = document.getElementById('settings-google-key');
+    this.googleClientInput = document.getElementById('settings-google-client');
     
     if (this.triggerBtn) {
       this.triggerBtn.addEventListener('click', () => this.openModal());
@@ -313,6 +316,8 @@ const SettingsManager = {
         if (this.openaiKeyInput) this.openaiKeyInput.value = config.OPENAI_API_KEY || '';
         if (this.openaiModelInput) this.openaiModelInput.value = config.OPENAI_MODEL || 'DeepSeek-V4-Flash';
         if (this.openaiBaseInput) this.openaiBaseInput.value = config.OPENAI_API_BASE || 'https://api.deepseek.com';
+        if (this.googleKeyInput) this.googleKeyInput.value = config.GOOGLE_API_KEY || '';
+        if (this.googleClientInput) this.googleClientInput.value = config.GOOGLE_CLIENT_ID || '';
         
         this.toggleProviderFields();
       }
@@ -342,7 +347,9 @@ const SettingsManager = {
       GEMINI_MODEL: this.geminiModelInput ? this.geminiModelInput.value.trim() : '',
       OPENAI_API_KEY: this.openaiKeyInput ? this.openaiKeyInput.value.trim() : '',
       OPENAI_MODEL: this.openaiModelInput ? this.openaiModelInput.value.trim() : '',
-      OPENAI_API_BASE: this.openaiBaseInput ? this.openaiBaseInput.value.trim() : ''
+      OPENAI_API_BASE: this.openaiBaseInput ? this.openaiBaseInput.value.trim() : '',
+      GOOGLE_API_KEY: this.googleKeyInput ? this.googleKeyInput.value.trim() : '',
+      GOOGLE_CLIENT_ID: this.googleClientInput ? this.googleClientInput.value.trim() : ''
     };
     
     try {
@@ -360,6 +367,219 @@ const SettingsManager = {
     } catch (err) {
       console.error(err);
       app.showToast('Lưu cấu hình thất bại.', 'error');
+    }
+  }
+};
+
+// ==========================================
+// 1.7. GOOGLE DRIVE IMPORT MODULE
+// ==========================================
+const GoogleDriveManager = {
+  init() {
+    this.triggerBtn = document.getElementById('google-drive-trigger-btn');
+    this.modal = document.getElementById('google-drive-modal');
+    this.closeBtn = document.getElementById('btn-close-google-modal');
+    
+    this.shareLinkInput = document.getElementById('google-share-link');
+    this.importLinkBtn = document.getElementById('btn-import-google-link');
+    this.openPickerBtn = document.getElementById('btn-open-google-picker');
+    
+    if (this.triggerBtn) {
+      this.triggerBtn.addEventListener('click', () => this.openModal());
+    }
+    if (this.closeBtn) {
+      this.closeBtn.addEventListener('click', () => this.modal.classList.add('hidden'));
+    }
+    if (this.modal) {
+      this.modal.addEventListener('click', (e) => {
+        if (e.target === this.modal) this.modal.classList.add('hidden');
+      });
+    }
+    
+    if (this.importLinkBtn) {
+      this.importLinkBtn.addEventListener('click', () => this.handleLinkImport());
+    }
+    if (this.openPickerBtn) {
+      this.openPickerBtn.addEventListener('click', () => this.handlePickerOpen());
+    }
+  },
+  
+  openModal() {
+    if (!app.state.currentProjectId) {
+      app.showToast('Vui lòng chọn hoặc tạo dự án trước khi nạp tài liệu!', 'warning');
+      return;
+    }
+    this.modal.classList.remove('hidden');
+    if (this.shareLinkInput) {
+      this.shareLinkInput.value = '';
+    }
+  },
+  
+  async handleLinkImport() {
+    const url = this.shareLinkInput.value.trim();
+    if (!url) {
+      app.showToast('Vui lòng nhập đường dẫn Google Drive!', 'warning');
+      return;
+    }
+    
+    const projId = app.state.currentProjectId;
+    this.modal.classList.add('hidden');
+    
+    // Switch to sources tab and show upload progress
+    WikiTreeManager.switchSidebarTab('tab-sources');
+    WikiTreeManager.progressWrapper.classList.remove('hidden');
+    WikiTreeManager.progressBar.style.width = '20%';
+    WikiTreeManager.progressPercent.textContent = '20%';
+    WikiTreeManager.progressText.textContent = 'Đang tải tệp từ liên kết Google Drive...';
+    
+    try {
+      const res = await fetch(`/api/projects/${projId}/upload/google-drive`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+      });
+      
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.error || 'Nhập từ Google Drive thất bại');
+      }
+      
+      const data = await res.json();
+      WikiTreeManager.progressBar.style.width = '100%';
+      WikiTreeManager.progressPercent.textContent = '100%';
+      WikiTreeManager.progressText.textContent = 'Hoàn thành nạp tri thức!';
+      
+      app.showToast(data.message || 'Đã nạp tài liệu thành công!', 'success');
+      WikiTreeManager.refreshWorkspace(projId);
+      app.events.emit('source:uploaded');
+    } catch (err) {
+      console.error(err);
+      app.showToast(`Lỗi khi nạp từ Google Drive: ${err.message}`, 'error');
+    } finally {
+      setTimeout(() => {
+        WikiTreeManager.progressWrapper.classList.add('hidden');
+      }, 3000);
+    }
+  },
+  
+  async handlePickerOpen() {
+    try {
+      const configRes = await fetch('/api/config');
+      if (!configRes.ok) throw new Error('Không thể tải cấu hình API');
+      const config = await configRes.json();
+      
+      const apiKey = config.GOOGLE_API_KEY;
+      const clientId = config.GOOGLE_CLIENT_ID;
+      
+      if (!apiKey || !clientId) {
+        app.showToast('Vui lòng cấu hình Google API Key và Client ID trong mục Cài đặt trước.', 'warning');
+        return;
+      }
+      
+      this.modal.classList.add('hidden');
+      
+      // Request access token using GIS
+      const tokenClient = google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: 'https://www.googleapis.com/auth/drive.readonly',
+        callback: async (response) => {
+          if (response.error !== undefined) {
+            console.error('GIS Error:', response);
+            app.showToast('Không thể xác thực tài khoản Google.', 'error');
+            return;
+          }
+          const accessToken = response.access_token;
+          this.openPicker(accessToken, apiKey, clientId);
+        },
+      });
+      tokenClient.requestAccessToken({ prompt: 'consent' });
+      
+    } catch (err) {
+      console.error(err);
+      app.showToast(`Không thể khởi chạy Google Picker: ${err.message}`, 'error');
+    }
+  },
+  
+  openPicker(accessToken, apiKey, clientId) {
+    gapi.load('picker', () => {
+      try {
+        const view = new google.picker.DocsView()
+          .setIncludeFolders(true)
+          .setMimeTypes([
+            'application/pdf',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'application/vnd.google-apps.document',
+            'application/vnd.google-apps.spreadsheet',
+            'application/vnd.google-apps.presentation',
+            'text/plain',
+            'text/markdown'
+          ].join(','));
+          
+        const picker = new google.picker.PickerBuilder()
+          .enableFeature(google.picker.Feature.NAV_HIDDEN)
+          .setDeveloperKey(apiKey)
+          .setAppId(clientId)
+          .setOAuthToken(accessToken)
+          .addView(view)
+          .setCallback(async (data) => {
+            if (data[google.picker.Response.ACTION] === google.picker.Action.PICKED) {
+              const docs = data[google.picker.Response.DOCUMENTS];
+              if (docs && docs.length > 0) {
+                const doc = docs[0];
+                await this.importPickerFile(doc, accessToken);
+              }
+            }
+          })
+          .build();
+        picker.setVisible(true);
+      } catch (err) {
+        console.error('Lỗi khi mở Picker:', err);
+        app.showToast('Không thể hiển thị Google Drive Picker.', 'error');
+      }
+    });
+  },
+  
+  async importPickerFile(doc, accessToken) {
+    const projId = app.state.currentProjectId;
+    const fileId = doc[google.picker.Document.ID];
+    const name = doc[google.picker.Document.NAME];
+    const mimeType = doc[google.picker.Document.MIME_TYPE];
+    
+    // Switch to sources tab and show upload progress
+    WikiTreeManager.switchSidebarTab('tab-sources');
+    WikiTreeManager.progressWrapper.classList.remove('hidden');
+    WikiTreeManager.progressBar.style.width = '30%';
+    WikiTreeManager.progressPercent.textContent = '30%';
+    WikiTreeManager.progressText.textContent = `Đang tải tệp "${name}" từ Google Drive...`;
+    
+    try {
+      const res = await fetch(`/api/projects/${projId}/upload/google-drive`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileId, name, mimeType, accessToken })
+      });
+      
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.error || 'Nạp tệp thất bại');
+      }
+      
+      const data = await res.json();
+      WikiTreeManager.progressBar.style.width = '100%';
+      WikiTreeManager.progressPercent.textContent = '100%';
+      WikiTreeManager.progressText.textContent = 'Hoàn thành nạp tri thức!';
+      
+      app.showToast(data.message || 'Nạp tệp thành công!', 'success');
+      WikiTreeManager.refreshWorkspace(projId);
+      app.events.emit('source:uploaded');
+    } catch (err) {
+      console.error(err);
+      app.showToast(`Lỗi khi nạp tệp từ Google Drive: ${err.message}`, 'error');
+    } finally {
+      setTimeout(() => {
+        WikiTreeManager.progressWrapper.classList.add('hidden');
+      }, 3000);
     }
   }
 };
@@ -1760,6 +1980,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initialize Modules
   ProjectManager.init();
   SettingsManager.init();
+  GoogleDriveManager.init();
   WikiTreeManager.init();
   GraphManager.init();
   ChatManager.init();
