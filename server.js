@@ -96,11 +96,12 @@ async function safeMoveFile(src, dest) {
   try {
     await fs.rename(src, dest);
   } catch (error) {
-    if (error.code === 'EXDEV') {
-      // Fallback: Copy and then unlink (delete)
+    // Try copy and unlink fallback for any error (e.g. EXDEV, EPERM, etc.)
+    try {
       await fs.copyFile(src, dest);
       await fs.unlink(src);
-    } else {
+    } catch (fallbackError) {
+      // If fallback fails, throw the original rename error to preserve context
       throw error;
     }
   }
@@ -1653,6 +1654,9 @@ app.post('/api/projects/:id/upload', upload.array('files'), async (req, res) => 
       const destPath = path.join(projectPath, 'sources', file.originalname);
       await safeMoveFile(file.path, destPath);
 
+      // Explicitly queue the file for ingestion in case file watcher doesn't trigger (e.g. in container environments)
+      await ingestQueue.addTask(id, file.originalname, destPath);
+
       results.push({
         filename: file.originalname,
         success: true,
@@ -1695,6 +1699,9 @@ app.post('/api/projects/:id/clip', async (req, res) => {
 
     const fullContent = `URL: ${url}\nTitle: ${title || 'Web Clip'}\nClipped At: ${new Date().toISOString()}\n\n${text}`;
     await fs.writeFile(sourcePath, fullContent);
+
+    // Explicitly queue the file for ingestion in case file watcher doesn't trigger (e.g. in container environments)
+    await ingestQueue.addTask(id, sourceFileName, sourcePath);
 
     res.json({
       success: true,
