@@ -719,6 +719,9 @@ const WikiTreeManager = {
           this.loadWikiPage('overview.md');
         }
       }
+
+      // Automatically run silent maintenance scan to find orphans, gaps & contradictions
+      this.runWikiMaintenance(true);
     } catch (err) {
       console.error(err);
       app.showToast('Lỗi khi tải tri thức dự án.', 'error');
@@ -1485,6 +1488,11 @@ const WikiTreeManager = {
           });
           this.contradictionsList.appendChild(li);
         });
+      }
+
+      // Automatically refresh the knowledge graph to reflect current node statuses
+      if (typeof GraphManager !== 'undefined' && GraphManager.loadGraphData) {
+        GraphManager.loadGraphData();
       }
 
       if (!silent) app.showToast('Phân tích Wiki hoàn tất!', 'success');
