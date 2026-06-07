@@ -1,0 +1,25 @@
+# Agent Execution Rules for MinusWiki
+
+Dưới đây là các quy tắc bắt buộc áp dụng đối với mọi Agent AI (Antigravity, Claude Code, Cursor, v.v.) trước khi thực thi bất kỳ câu lệnh nào trong repository này:
+
+---
+
+## 1. Không tự động kiểm thử (No Automated Testing)
+* **Quy tắc:** Agent **TUYỆT ĐỐI KHÔNG** được tự động khởi tạo trình duyệt con (Browser Subagent) hoặc chạy các công cụ kiểm thử tự động (như Playwright, Selenium, Puppeteer, v.v.) nếu chưa có yêu cầu trực tiếp và rõ ràng từ câu lệnh của người dùng.
+* **Lý do:** Tránh lãng phí tài nguyên và chi phí API không cần thiết khi thực hiện các tác vụ phát triển thông thường.
+
+## 2. Không tự động Push lên nhánh `main` (No Unrequested Pushing to Main)
+* **Quy tắc:** Agent **TUYỆT ĐỐI KHÔNG** được tự động thực hiện thao tác `git push` lên nhánh `main` để kích hoạt hệ thống CI/CD triển khai lên Railway.app trừ khi nhận được yêu cầu rõ ràng từ người dùng.
+* **Lý do:** Việc tự động push có thể làm gián đoạn môi trường sản phẩm (production environment) của Railway và làm tiêu hao hạn mức tài nguyên (Railway usage hours).
+
+---
+
+## Agent Instructions (English Version)
+
+Please strictly adhere to the following rules when working on this project:
+
+1. **NO AUTOMATED TESTING WITHOUT DIRECT REQUESTS:**
+   * Do NOT invoke any automated testing subagents (browser subagent, Playwright, Selenium, etc.) unless specifically and explicitly requested by the user's prompt.
+
+2. **NO UNREQUESTED PUSHES TO THE `main` BRANCH:**
+   * Do NOT execute `git push origin main` or any commands that push commits to the `main` branch unless specifically requested by the user. Pushing to `main` triggers automatic Railway.app CI/CD builds and deployments, which must not be initiated automatically.
