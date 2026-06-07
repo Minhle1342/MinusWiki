@@ -2171,3 +2171,38 @@ body {
   font-size: 0.8rem;
   font-weight: 500;
 }
+
+/* ==========================================
+   Panel Resizer Drag Handle Styling
+   ========================================== */
+.panel-resizer {
+  width: 6px;
+  cursor: col-resize;
+  align-self: stretch;
+  flex-shrink: 0;
+  z-index: 10;
+  position: relative;
+  margin: 0 -11px; /* Overlaps the gap to not push panels apart */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s ease;
+}
+
+/* Subtle visual line indicating interactive resize area */
+.panel-resizer::after {
+  content: '';
+  width: 2px;
+  height: 40px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 1px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.panel-resizer:hover::after,
+.panel-resizer.is-dragging::after {
+  background: var(--primary);
+  height: 100%;
+  box-shadow: 0 0 10px var(--primary), 0 0 20px var(--primary);
+}
+

@@ -1974,6 +1974,65 @@ const ChatManager = {
 };
 
 // ==========================================
+// 4.5. RIGHT PANEL RESIZER MODULE
+// ==========================================
+const RightPanelResizer = {
+  init() {
+    this.resizer = document.getElementById('right-panel-resizer');
+    this.panel = document.getElementById('right-panel');
+    
+    if (!this.resizer || !this.panel) return;
+    
+    this.isDragging = false;
+    
+    this.resizer.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      this.isDragging = true;
+      this.resizer.classList.add('is-dragging');
+      document.body.style.cursor = 'col-resize';
+      document.body.style.userSelect = 'none'; // prevent text selection during drag
+    });
+    
+    document.addEventListener('mousemove', (e) => {
+      if (!this.isDragging) return;
+      
+      // Calculate new width: viewport width - mouse X position - page padding (16px)
+      const containerPadding = 16; 
+      let newWidth = window.innerWidth - e.clientX - containerPadding;
+      
+      // Enforce min and max width constraints
+      if (newWidth < 280) newWidth = 280;
+      if (newWidth > window.innerWidth * 0.7) newWidth = window.innerWidth * 0.7; // max 70% of screen width
+      
+      this.panel.style.width = `${newWidth}px`;
+    });
+    
+    document.addEventListener('mouseup', () => {
+      if (this.isDragging) {
+        this.isDragging = false;
+        this.resizer.classList.remove('is-dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        
+        // Save the preferred width in localStorage
+        localStorage.setItem('minuswiki_right_panel_width', this.panel.style.width);
+        
+        // If graph tab is active, trigger resize to update D3
+        if (typeof GraphManager !== 'undefined' && GraphManager.loadGraphData) {
+          GraphManager.loadGraphData();
+        }
+      }
+    });
+    
+    // Load saved width on init
+    const savedWidth = localStorage.getItem('minuswiki_right_panel_width');
+    if (savedWidth) {
+      this.panel.style.width = savedWidth;
+    }
+  }
+};
+
+// ==========================================
 // 5. BOOTSTRAP INITIALIZATION
 // ==========================================
 document.addEventListener('DOMContentLoaded', () => {
@@ -1984,6 +2043,7 @@ document.addEventListener('DOMContentLoaded', () => {
   WikiTreeManager.init();
   GraphManager.init();
   ChatManager.init();
+  RightPanelResizer.init();
   
   // Right Drawer Tab switcher bind
   const panelTabButtons = document.querySelectorAll('.panel-tab-btn');
