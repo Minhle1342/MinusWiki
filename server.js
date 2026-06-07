@@ -48,6 +48,12 @@ async function loadConfig() {
     try {
       const data = JSON.parse(await fs.readFile(CONFIG_PATH, 'utf-8'));
       appConfig = { ...appConfig, ...data };
+      // Trim all configuration values
+      for (const key in appConfig) {
+        if (typeof appConfig[key] === 'string') {
+          appConfig[key] = appConfig[key].trim();
+        }
+      }
       console.log('Configuration loaded from storage/config.json');
     } catch (e) {
       // Config file might not exist yet, that's fine
@@ -60,7 +66,12 @@ loadConfig().catch(console.error);
 
 async function saveConfig(newConfig) {
   try {
-    appConfig = { ...appConfig, ...newConfig };
+    // Trim all new config values before merging
+    const trimmedNewConfig = {};
+    for (const key in newConfig) {
+      trimmedNewConfig[key] = typeof newConfig[key] === 'string' ? newConfig[key].trim() : newConfig[key];
+    }
+    appConfig = { ...appConfig, ...trimmedNewConfig };
     await fs.mkdir(STORAGE_DIR, { recursive: true });
     await fs.writeFile(CONFIG_PATH, JSON.stringify(appConfig, null, 2), 'utf-8');
     console.log('Configuration saved to storage/config.json');
@@ -69,8 +80,27 @@ async function saveConfig(newConfig) {
   }
 }
 
-// Configure multer for file uploads
-const upload = multer({ dest: TMP_DIR });
+// Configure multer for file uploads directly to the project sources folder to avoid cross-device EXDEV issues
+const storage = multer.diskStorage({
+  destination: async function (req, file, cb) {
+    try {
+      const { id } = req.params;
+      if (!id) {
+        return cb(new Error('Project ID is required in URL path.'));
+      }
+      const projectPath = path.join(PROJECTS_DIR, id);
+      const destDir = path.join(projectPath, 'sources');
+      await fs.mkdir(destDir, { recursive: true });
+      cb(null, destDir);
+    } catch (err) {
+      cb(err);
+    }
+  },
+  filename: function (req, file, cb) {
+    cb(null, file.originalname);
+  }
+});
+const upload = multer({ storage });
 
 // Concurrency Control: Map of projectId -> Mutex
 // Used to prevent file corruption during concurrent LLM writes to index.md, overview.md, and other wiki pages.
@@ -91,21 +121,6 @@ async function ensureDirs() {
 }
 ensureDirs().catch(console.error);
 
-// Robust file mover supporting cross-device (EXDEV) fallbacks
-async function safeMoveFile(src, dest) {
-  try {
-    await fs.rename(src, dest);
-  } catch (error) {
-    // Try copy and unlink fallback for any error (e.g. EXDEV, EPERM, etc.)
-    try {
-      await fs.copyFile(src, dest);
-      await fs.unlink(src);
-    } catch (fallbackError) {
-      // If fallback fails, throw the original rename error to preserve context
-      throw error;
-    }
-  }
-}
 
 // Middlewares
 app.use(cors());
@@ -845,9 +860,9 @@ async function callLLMGemini(systemInstruction, userPrompt, jsonMode, useThinkin
  * Unified LLM caller supporting Gemini API and OpenAI API
  */
 async function callLLM(systemInstruction, userPrompt, jsonMode = false) {
-  const geminiKey = appConfig.GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-  const openaiKey = appConfig.OPENAI_API_KEY || process.env.OPENAI_API_KEY;
-  const provider = appConfig.LLM_PROVIDER || process.env.LLM_PROVIDER || (geminiKey ? 'gemini' : 'openai');
+  const geminiKey = (appConfig.GEMINI_API_KEY || process.env.GEMINI_API_KEY || '').trim();
+  const openaiKey = (appConfig.OPENAI_API_KEY || process.env.OPENAI_API_KEY || '').trim();
+  const provider = (appConfig.LLM_PROVIDER || process.env.LLM_PROVIDER || (geminiKey ? 'gemini' : 'openai')).trim();
 
   if (provider === 'gemini' && geminiKey) {
     try {
@@ -1053,6 +1068,7 @@ async function runIngestPipeline(projectId, sourceName, text) {
     Chỉ trích xuất các khái niệm cốt lõi thực sự hữu ích. Trả về đúng định dạng JSON, không có thêm ký tự markdown hay lời giải thích nào bên ngoài khối JSON.
     `;
 
+    let lastError = null;
     for (let i = 0; i < chunks.length; i++) {
       console.log(`Processing chunk ${i + 1}/${chunks.length} for source "${sourceName}"`);
       const userPrompt = `Hãy trích xuất kiến thức từ đoạn văn bản sau đây:\n\n${chunks[i]}`;
@@ -1064,12 +1080,25 @@ async function runIngestPipeline(projectId, sourceName, text) {
         }
       } catch (err) {
         console.error(`Error processing chunk ${i + 1}:`, err);
+        lastError = err;
       }
     }
 
     const mergedConcepts = mergeConcepts(allExtractedConcepts);
     if (mergedConcepts.length === 0) {
-      return { success: false, message: 'No concepts could be extracted.' };
+      if (lastError) {
+        return { success: false, message: `LLM extraction failed: ${lastError.message}` };
+      }
+      // Fallback: treat the entire file content as a single concept named after the file
+      const baseName = sourceName.replace(/\.[^/.]+$/, ""); // strip extension
+      const fallbackConcept = {
+        name: baseName.replace(/_/g, ' '),
+        slug: baseName.toLowerCase().replace(/[^a-z0-9_]/g, '_').substring(0, 50),
+        definition: `Tài liệu nạp từ file ${sourceName}.`,
+        content: text,
+        related: []
+      };
+      mergedConcepts.push(fallbackConcept);
     }
 
     // Step 2: Synthesis & File Integration
@@ -1651,11 +1680,9 @@ app.post('/api/projects/:id/upload', upload.array('files'), async (req, res) => 
   const results = [];
   try {
     for (const file of req.files) {
-      const destPath = path.join(projectPath, 'sources', file.originalname);
-      await safeMoveFile(file.path, destPath);
-
+      // The file is already written directly to its final destination in sources/ by multer.diskStorage.
       // Explicitly queue the file for ingestion in case file watcher doesn't trigger (e.g. in container environments)
-      await ingestQueue.addTask(id, file.originalname, destPath);
+      await ingestQueue.addTask(id, file.originalname, file.path);
 
       results.push({
         filename: file.originalname,
