@@ -28,7 +28,7 @@ const __dirname = path.dirname(__filename);
 const isVercel = process.env.VERCEL || process.env.NOW_REGION;
 const STORAGE_DIR = isVercel ? '/tmp/storage' : path.join(__dirname, 'storage');
 const PROJECTS_DIR = path.join(STORAGE_DIR, 'projects');
-const TMP_DIR = isVercel ? '/tmp/tmp' : path.join(__dirname, 'tmp');
+const TMP_DIR = path.join(STORAGE_DIR, 'tmp');
 
 // Configuration System (Dynamic API keys via UI)
 const CONFIG_PATH = path.join(STORAGE_DIR, 'config.json');
@@ -90,6 +90,21 @@ async function ensureDirs() {
   await fs.mkdir(TMP_DIR, { recursive: true });
 }
 ensureDirs().catch(console.error);
+
+// Robust file mover supporting cross-device (EXDEV) fallbacks
+async function safeMoveFile(src, dest) {
+  try {
+    await fs.rename(src, dest);
+  } catch (error) {
+    if (error.code === 'EXDEV') {
+      // Fallback: Copy and then unlink (delete)
+      await fs.copyFile(src, dest);
+      await fs.unlink(src);
+    } else {
+      throw error;
+    }
+  }
+}
 
 // Middlewares
 app.use(cors());
@@ -1636,7 +1651,7 @@ app.post('/api/projects/:id/upload', upload.array('files'), async (req, res) => 
   try {
     for (const file of req.files) {
       const destPath = path.join(projectPath, 'sources', file.originalname);
-      await fs.rename(file.path, destPath);
+      await safeMoveFile(file.path, destPath);
 
       results.push({
         filename: file.originalname,
