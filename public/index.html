@@ -191,8 +191,12 @@
 
           <!-- Tab 4: Maintenance & Optimization -->
           <div id="tab-maintenance" class="tab-pane">
-            <div class="tab-pane-header">
+            <div class="tab-pane-header" style="display: flex; justify-content: space-between; align-items: center;">
               <h3>Phân tích & Tối ưu</h3>
+              <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); cursor: pointer; user-select: none;">
+                <input type="checkbox" id="chk-auto-maintenance" style="cursor: pointer; width: 14px; height: 14px; accent-color: var(--primary-color);">
+                <span>Auto</span>
+              </label>
             </div>
             
             <div class="maintenance-actions" style="padding: 0 15px 15px 15px;">

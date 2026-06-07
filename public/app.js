@@ -630,6 +630,7 @@ const WikiTreeManager = {
     this.autoLinkAllBtn = document.getElementById('auto-link-all-btn');
     this.gapsList = document.getElementById('gaps-list');
     this.contradictionsList = document.getElementById('contradictions-list');
+    this.autoMaintenanceChk = document.getElementById('chk-auto-maintenance');
 
     // Bind event handlers
     this.searchInput.addEventListener('input', () => this.filterPagesList());
@@ -666,6 +667,15 @@ const WikiTreeManager = {
       this.updateMpeUI();
     });
 
+    this.autoMaintenanceMode = localStorage.getItem('minuswiki_auto_maintenance') === 'true';
+    if (this.autoMaintenanceChk) {
+      this.autoMaintenanceChk.checked = this.autoMaintenanceMode;
+      this.autoMaintenanceChk.addEventListener('change', (e) => {
+        this.autoMaintenanceMode = e.target.checked;
+        localStorage.setItem('minuswiki_auto_maintenance', this.autoMaintenanceMode);
+      });
+    }
+
     if (this.runMaintenanceBtn) {
       this.runMaintenanceBtn.addEventListener('click', () => this.runWikiMaintenance());
     }
@@ -684,6 +694,11 @@ const WikiTreeManager = {
     // Subscriptions
     app.events.on('project:changed', (projId) => this.refreshWorkspace(projId));
     app.events.on('wiki:page-selected', (filename) => this.loadWikiPage(filename));
+    app.events.on('source:uploaded', () => {
+      if (this.autoMaintenanceMode) {
+        this.runWikiMaintenance(true);
+      }
+    });
 
     // Start polling the ingest queue
     this.startQueuePolling();
