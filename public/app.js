@@ -1803,19 +1803,37 @@ const GraphManager = {
     if (!filename) return;
     const activeId = filename.replace('.md', '');
     
-    // Remove active styles from all nodes
-    this.g.selectAll(".graph-node").classed("active", false);
-    this.g.selectAll(".graph-label").classed("active", false);
-    this.g.selectAll(".graph-link").classed("highlighted", false);
+    // Remove active and connected styles from all nodes and labels
+    this.g.selectAll(".graph-node")
+      .classed("active", false)
+      .classed("connected-active", false);
+    this.g.selectAll(".graph-label")
+      .classed("active", false)
+      .classed("connected-active", false);
+    this.g.selectAll(".graph-link")
+      .classed("highlighted", false);
 
-    // Add active styles
+    // Add active styles to the selected node
     this.g.select(`#node-${activeId}`).classed("active", true);
     this.g.select(`#label-${activeId}`).classed("active", true);
 
-    // Highlight links connected to this active node
+    // Track all connected node IDs and highlight link connections
+    const linkedNodeIds = new Set();
     this.g.selectAll(".graph-link").each(function(l) {
-      if (l.source.id === activeId || l.target.id === activeId) {
+      if (l.source.id === activeId) {
+        linkedNodeIds.add(l.target.id);
         d3.select(this).classed("highlighted", true);
+      } else if (l.target.id === activeId) {
+        linkedNodeIds.add(l.source.id);
+        d3.select(this).classed("highlighted", true);
+      }
+    });
+
+    // Add connected-active class to all neighboring nodes & labels
+    linkedNodeIds.forEach(nodeId => {
+      if (nodeId !== activeId) {
+        this.g.select(`#node-${nodeId}`).classed("connected-active", true);
+        this.g.select(`#label-${nodeId}`).classed("connected-active", true);
       }
     });
   }

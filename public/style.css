@@ -1310,7 +1310,13 @@ body {
 .graph-node.active {
   stroke: white;
   stroke-width: 2.5px;
-  filter: drop-shadow(0 0 8px var(--primary));
+  filter: drop-shadow(0 0 10px var(--primary)) brightness(1.2);
+}
+
+.graph-node.connected-active {
+  stroke: rgba(255, 255, 255, 0.8);
+  stroke-width: 2px;
+  filter: drop-shadow(0 0 8px var(--primary-glow)) brightness(1.1);
 }
 
 .graph-link {
@@ -1341,6 +1347,12 @@ body {
 .graph-label.active {
   fill: white;
   font-size: 10px;
+  font-weight: 600;
+}
+
+.graph-label.connected-active {
+  fill: #E2E8F0;
+  font-size: 9.5px;
   font-weight: 600;
 }
 
