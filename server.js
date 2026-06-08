@@ -2768,14 +2768,35 @@ app.post('/api/projects/:id/wiki/auto-link', async (req, res) => {
 
   try {
     const updatedTargets = [];
+    const existingFiles = await fs.readdir(wikiDir);
+
     for (const sug of suggestions) {
-      const targetFilename = sug.target;
+      let targetFilename = sug.target;
       const reason = sug.reason;
       if (!targetFilename) continue;
 
-      const targetPath = path.join(wikiDir, targetFilename);
-      if (!existsSync(targetPath)) continue;
+      // Normalize target filename
+      targetFilename = path.basename(targetFilename.trim());
+      if (!targetFilename.endsWith('.md')) {
+        targetFilename += '.md';
+      }
 
+      // Case-insensitive lookup
+      const matchedFile = existingFiles.find(
+        f => f.toLowerCase() === targetFilename.toLowerCase()
+      );
+
+      if (!matchedFile) {
+        console.warn(`[Auto-Link] Suggested target file not found: ${sug.target}`);
+        continue;
+      }
+
+      // Skip linking page to itself
+      if (matchedFile.toLowerCase() === orphanFilename.toLowerCase()) {
+        continue;
+      }
+
+      const targetPath = path.join(wikiDir, matchedFile);
       let rawContent = await fs.readFile(targetPath, 'utf-8');
       const { frontmatter, content } = parseFrontmatter(rawContent);
       
@@ -2815,20 +2836,24 @@ app.post('/api/projects/:id/wiki/auto-link', async (req, res) => {
       
       const finalPageContent = stringifyFrontmatter(frontmatter, newContent);
       await fs.writeFile(targetPath, finalPageContent, 'utf-8');
-      updatedTargets.push(targetFilename);
+      updatedTargets.push(matchedFile);
 
       // Log to log.md
       try {
         const logFilePath = path.join(wikiDir, 'log.md');
         const timestamp = new Date().toISOString();
-        const targetCleanName = targetFilename.replace('.md', '').replace(/_/g, ' ');
+        const targetCleanName = matchedFile.replace('.md', '').replace(/_/g, ' ');
         await fs.appendFile(
           logFilePath,
-          `\n- [${timestamp}] Đã tạo liên kết tự động từ [${targetCleanName}](${targetFilename}) tới trang mồ côi [${orphanTitle}](${orphanFilename})\n`
+          `\n- [${timestamp}] Đã tạo liên kết tự động từ [${targetCleanName}](${matchedFile}) tới trang mồ côi [${orphanTitle}](${orphanFilename})\n`
         );
       } catch (err) {
         console.error('Failed to append to log.md in auto-link:', err);
       }
+    }
+
+    if (updatedTargets.length === 0) {
+      return res.json({ success: true, message: 'Không có liên kết mới nào được tạo (liên kết đã tồn tại hoặc tệp đích không hợp lệ).', updatedTargets });
     }
 
     res.json({ success: true, message: 'Đã tự động liên kết thành công!', updatedTargets });
@@ -2859,6 +2884,7 @@ app.post('/api/projects/:id/wiki/auto-link-all', async (req, res) => {
     const updatedTargets = [];
     const logFilePath = path.join(wikiDir, 'log.md');
     const timestamp = new Date().toISOString();
+    const existingFiles = await fs.readdir(wikiDir);
 
     for (const orph of orphans) {
       const { filename: orphanFilename, title: orphanTitle, suggestions } = orph;
@@ -2867,13 +2893,32 @@ app.post('/api/projects/:id/wiki/auto-link-all', async (req, res) => {
       }
 
       for (const sug of suggestions) {
-        const targetFilename = sug.target;
+        let targetFilename = sug.target;
         const reason = sug.reason;
         if (!targetFilename) continue;
 
-        const targetPath = path.join(wikiDir, targetFilename);
-        if (!existsSync(targetPath)) continue;
+        // Normalize target filename
+        targetFilename = path.basename(targetFilename.trim());
+        if (!targetFilename.endsWith('.md')) {
+          targetFilename += '.md';
+        }
 
+        // Case-insensitive lookup
+        const matchedFile = existingFiles.find(
+          f => f.toLowerCase() === targetFilename.toLowerCase()
+        );
+
+        if (!matchedFile) {
+          console.warn(`[Auto-Link All] Suggested target file not found: ${sug.target}`);
+          continue;
+        }
+
+        // Skip linking page to itself
+        if (matchedFile.toLowerCase() === orphanFilename.toLowerCase()) {
+          continue;
+        }
+
+        const targetPath = path.join(wikiDir, matchedFile);
         let rawContent = await fs.readFile(targetPath, 'utf-8');
         const { frontmatter, content } = parseFrontmatter(rawContent);
 
@@ -2913,21 +2958,25 @@ app.post('/api/projects/:id/wiki/auto-link-all', async (req, res) => {
 
         const finalPageContent = stringifyFrontmatter(frontmatter, newContent);
         await fs.writeFile(targetPath, finalPageContent, 'utf-8');
-        if (!updatedTargets.includes(targetFilename)) {
-          updatedTargets.push(targetFilename);
+        if (!updatedTargets.includes(matchedFile)) {
+          updatedTargets.push(matchedFile);
         }
 
         // Log to log.md
         try {
-          const targetCleanName = targetFilename.replace('.md', '').replace(/_/g, ' ');
+          const targetCleanName = matchedFile.replace('.md', '').replace(/_/g, ' ');
           await fs.appendFile(
             logFilePath,
-            `\n- [${timestamp}] Đã tạo liên kết tự động từ [${targetCleanName}](${targetFilename}) tới trang mồ côi [${orphanTitle}](${orphanFilename})\n`
+            `\n- [${timestamp}] Đã tạo liên kết tự động từ [${targetCleanName}](${matchedFile}) tới trang mồ côi [${orphanTitle}](${orphanFilename})\n`
           );
         } catch (err) {
           console.error('Failed to append to log.md in auto-link-all:', err);
         }
       }
+    }
+
+    if (updatedTargets.length === 0) {
+      return res.json({ success: true, message: 'Không có liên kết mới nào được tạo (liên kết đã tồn tại hoặc tệp đích không hợp lệ).', updatedTargets });
     }
 
     res.json({ success: true, message: 'Đã tự động liên kết tất cả trang mồ côi thành công!', updatedTargets });
