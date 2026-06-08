@@ -1737,10 +1737,11 @@ const GraphManager = {
 
     // Colors mapping
     const colorScale = d3.scaleOrdinal()
-      .domain(["index", "overview", "contradiction", "orphan", "gap", "other"])
-      .range(["#10B981", "#0EA5E9", "#EF4444", "#F59E0B", "#A855F7", "#6366F1"]); // Green, sky blue, Red, Orange, Purple, Indigo
+      .domain(["index", "overview", "contradiction", "orphan", "gap", "purpose", "other"])
+      .range(["#10B981", "#0EA5E9", "#EF4444", "#F59E0B", "#A855F7", "#94A3B8", "#6366F1"]); // Green, sky blue, Red, Orange, Purple, Light Gray, Indigo
 
     const getNodeColor = (d) => {
+      if (d.id === 'purpose') return '#94A3B8'; // Light gray for purpose.md
       if (d.isContradiction) return '#EF4444'; // Red for contradiction
       if (d.isOrphan) return '#F59E0B';        // Orange/Yellow for orphans
       if (d.isGap) return '#A855F7';           // Purple for gaps

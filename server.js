@@ -271,6 +271,9 @@ function parseFrontmatter(markdown) {
 }
 
 function stringifyFrontmatter(frontmatter, content) {
+  if (!frontmatter || Object.keys(frontmatter).length === 0) {
+    return content;
+  }
   let fmText = '---\n';
   for (const [key, val] of Object.entries(frontmatter)) {
     if (Array.isArray(val)) {
@@ -417,6 +420,325 @@ async function describePdfImages(pdfBuffer) {
   return "";
 }
 
+/**
+ * Automatically link newly ingested pages, index.md, and overview.md to each other.
+ */
+async function linkIngestedPages(projectId, newSlugs) {
+  const wikiDir = path.join(PROJECTS_DIR, projectId, 'wiki');
+  const logFilePath = path.join(wikiDir, 'log.md');
+  const timestamp = new Date().toISOString();
+
+  console.log(`[Link Ingested Pages] Processing linking for slugs:`, newSlugs);
+
+  // Helper function to clean markdown block
+  function cleanMarkdownBlock(text) {
+    let clean = text.trim();
+    if (clean.startsWith('```markdown')) {
+      clean = clean.slice(11);
+      if (clean.endsWith('```')) clean = clean.slice(0, -3);
+    } else if (clean.startsWith('```')) {
+      clean = clean.slice(3);
+      if (clean.endsWith('```')) clean = clean.slice(0, -3);
+    }
+    return clean.trim();
+  }
+
+  // 1. Link index.md and overview.md together
+  try {
+    const indexFilePath = path.join(wikiDir, 'index.md');
+    const overviewFilePath = path.join(wikiDir, 'overview.md');
+    
+    if (existsSync(indexFilePath) && existsSync(overviewFilePath)) {
+      let indexRaw = await fs.readFile(indexFilePath, 'utf-8');
+      let overviewRaw = await fs.readFile(overviewFilePath, 'utf-8');
+      
+      const parsedIndex = parseFrontmatter(indexRaw);
+      const parsedOverview = parseFrontmatter(overviewRaw);
+      
+      let indexUpdated = false;
+      let overviewUpdated = false;
+      
+      if (!parsedIndex.content.includes('overview.md')) {
+        parsedIndex.content = `> **Xem thêm:** [Tổng quan hệ thống](./overview.md)\n\n` + parsedIndex.content;
+        indexUpdated = true;
+      }
+      
+      if (!parsedOverview.content.includes('index.md')) {
+        parsedOverview.content = `> **Xem thêm:** [Danh mục kiến thức](./index.md)\n\n` + parsedOverview.content;
+        overviewUpdated = true;
+      }
+      
+      if (indexUpdated) {
+        await fs.writeFile(indexFilePath, stringifyFrontmatter(parsedIndex.frontmatter, parsedIndex.content), 'utf-8');
+      }
+      if (overviewUpdated) {
+        await fs.writeFile(overviewFilePath, stringifyFrontmatter(parsedOverview.frontmatter, parsedOverview.content), 'utf-8');
+      }
+    }
+  } catch (err) {
+    console.error('Failed to link index.md and overview.md:', err);
+  }
+
+  if (!newSlugs || newSlugs.length === 0) return;
+
+  // 2. Read new pages information (slug, title, definition)
+  const newPagesInfo = [];
+  for (const slug of newSlugs) {
+    const pageFilename = `${slug}.md`;
+    const pagePath = path.join(wikiDir, pageFilename);
+    if (!existsSync(pagePath)) continue;
+
+    try {
+      const pageRaw = await fs.readFile(pagePath, 'utf-8');
+      const { frontmatter, content } = parseFrontmatter(pageRaw);
+      const title = frontmatter.title || slug.replace(/_/g, ' ');
+      
+      let definition = frontmatter.definition || '';
+      if (!definition) {
+        const lines = content.trim().split('\n');
+        for (const line of lines) {
+          const cleanLine = line.trim();
+          if (cleanLine.startsWith('> **Định nghĩa:**')) {
+            definition = cleanLine.replace(/^>\s*\*\*Định nghĩa:\*\*\s*/i, '').trim();
+            break;
+          }
+        }
+        if (!definition && lines.length > 0) {
+          definition = lines[0].replace(/^>\s*/, '').trim();
+        }
+      }
+      if (!definition) {
+        definition = `Trang kiến thức về ${title}.`;
+      }
+
+      newPagesInfo.push({
+        slug,
+        title,
+        definition,
+        content: content.trim()
+      });
+    } catch (err) {
+      console.error(`Failed to read details for page ${slug}:`, err);
+    }
+  }
+
+  if (newPagesInfo.length === 0) return;
+
+  // 3. Append navigation links to each new page (creating the reverse cross-link)
+  for (const page of newPagesInfo) {
+    const pageFilename = `${page.slug}.md`;
+    const pagePath = path.join(wikiDir, pageFilename);
+
+    try {
+      let pageRaw = await fs.readFile(pagePath, 'utf-8');
+      const { frontmatter, content } = parseFrontmatter(pageRaw);
+      
+      let footerLinks = [];
+      footerLinks.push(`[Danh mục](./index.md)`);
+      footerLinks.push(`[Tổng quan](./overview.md)`);
+      
+      for (const otherPage of newPagesInfo) {
+        if (otherPage.slug !== page.slug) {
+          footerLinks.push(`[${otherPage.title}](./${otherPage.slug}.md)`);
+        }
+      }
+      
+      let newContent = content.trim();
+      const hasXemThem = /##\s*(Xem thêm|Liên kết|Tham khảo)/i.test(newContent);
+      
+      if (hasXemThem) {
+        newContent += `\n\n- ` + footerLinks.join('\n- ');
+      } else {
+        newContent += `\n\n## Xem thêm\n- ` + footerLinks.join('\n- ');
+      }
+      
+      await fs.writeFile(pagePath, stringifyFrontmatter(frontmatter, newContent), 'utf-8');
+      console.log(`[Link Ingested Pages] Appended navigation footer to ${pageFilename}`);
+    } catch (err) {
+      console.error(`Failed to append navigation footer to ${pageFilename}:`, err);
+    }
+  }
+
+  // 4. BẮT BUỘC: Cập nhật trang Tổng quan (overview.md) bằng Gemini
+  try {
+    const overviewFilePath = path.join(wikiDir, 'overview.md');
+    if (existsSync(overviewFilePath)) {
+      const overviewRaw = await fs.readFile(overviewFilePath, 'utf-8');
+      const { frontmatter, content } = parseFrontmatter(overviewRaw);
+
+      const overviewSystem = `
+Bạn là một trợ lý AI thông minh chuyên biên soạn và quản lý tài liệu Wiki bằng tiếng Việt.
+Nhiệm vụ của bạn là cập nhật nội dung của trang Tổng quan (overview.md) để tích hợp liên kết tới các trang tài liệu mới được upload.
+
+Quy tắc BẮT BUỘC:
+1. Hãy đọc kỹ nội dung hiện tại của trang Tổng quan và thông tin của các trang mới được nạp.
+2. Phân tích nội dung hiện tại của trang Tổng quan, xác định các từ khóa hoặc ngữ cảnh phù hợp nhất với tiêu đề/nội dung của các trang mới upload để tạo liên kết chéo (Cross-link) hai chiều.
+3. Lồng ghép các liên kết mới này một cách tự nhiên vào các đoạn văn giới thiệu chung trong nội dung hiện tại dưới dạng [[Tên_trang_mới]] hoặc [Mô tả](./Tên_trang_mới.md) (ví dụ: [[Docker_Container]] hoặc [Docker Container](./Docker_Container.md)).
+4. Nếu KHÔNG tìm thấy ngữ cảnh phù hợp nào trong nội dung hiện tại để lồng ghép tự nhiên, bạn phải cập nhật hoặc tạo mới một mục có tên là "## Tài liệu mới cập nhật" ở phần cuối trang (trước phần Xem thêm/Liên kết nếu có) và liệt kê các liên kết đến các trang mới này kèm theo tóm tắt ngắn dưới dạng danh sách dấu chấm (bullet points).
+5. Toàn bộ nội dung sau khi được cấu trúc lại và bổ sung liên kết phải được trình bày rõ ràng, phân tách bằng các thẻ Tiêu đề (Headings), Danh sách dấu chấm (Bullet points), và khoảng trống hợp lý.
+6. TUYỆT ĐỐI KHÔNG làm phá vỡ hoặc ghi đè mất cấu trúc nội dung cốt lõi và các thông tin sẵn có của trang tổng quan hiện tại. Chỉ thêm/lồng ghép liên kết và phần mới nếu cần.
+7. Đầu ra phải là TOÀN BỘ nội dung Markdown mới của trang tổng quan (không bao gồm frontmatter và không nằm trong khối code block \`\`\`, chỉ trả về text markdown thuần túy để lưu trực tiếp vào file).
+`;
+
+      const overviewUser = `
+=== NỘI DUNG TỔNG QUAN HIỆN TẠI (overview.md) ===
+${content}
+
+=== CÁC TRANG MỚI UPLOAD CẦN LIÊN KẾT ===
+${newPagesInfo.map(p => `- File: "${p.slug}.md", Tiêu đề: "${p.title}", Định nghĩa/Tóm tắt: "${p.definition}"`).join('\n')}
+`;
+
+      const updatedOverview = await callLLM(overviewSystem, overviewUser, false);
+      let cleanOverview = cleanMarkdownBlock(updatedOverview);
+
+      if (cleanOverview && cleanOverview.length > 20) {
+        await fs.writeFile(overviewFilePath, stringifyFrontmatter(frontmatter, cleanOverview), 'utf-8');
+        console.log(`[Link Ingested Pages] Updated overview.md with new links.`);
+      }
+    }
+  } catch (err) {
+    console.error('Failed to update overview.md in linkIngestedPages:', err);
+  }
+
+  // 5. BẮT BUỘC: Cập nhật trang Danh mục (index.md) bằng Gemini
+  try {
+    const indexFilePath = path.join(wikiDir, 'index.md');
+    if (existsSync(indexFilePath)) {
+      const indexRaw = await fs.readFile(indexFilePath, 'utf-8');
+      const { frontmatter, content } = parseFrontmatter(indexRaw);
+
+      const indexSystem = `
+Bạn là một trợ lý AI thông minh chuyên biên soạn và quản lý tài liệu Wiki bằng tiếng Việt.
+Nhiệm vụ của bạn là cập nhật lục danh mục (index.md) để sắp xếp liên kết của các trang mới được upload vào đúng sơ đồ cây (Hierarchy) hoặc danh mục phân loại chủ đề tương ứng để đảm bảo tính hệ thống.
+
+Quy tắc BẮT BUỘC:
+1. Đọc kỹ nội dung danh mục hiện tại của trang index.md và thông tin của các trang mới được nạp.
+2. Xác định phần/chủ đề/chuyên mục hiện tại phù hợp nhất trong index.md để chèn liên kết của các trang mới dưới dạng bullet points.
+3. Định dạng liên kết chèn vào phải ở dạng [[Tên_trang_mới]] hoặc [Tiêu đề](./Tên_trang_mới.md) kèm định nghĩa ngắn (ví dụ: - [Docker Container](./Docker_Container.md) : Công cụ đóng gói ứng dụng).
+4. Nếu chưa có danh mục phân loại chủ đề phù hợp trong index.md, bạn được phép tạo thêm một Heading mới hoặc chuyên mục con mới tương ứng với chủ đề của các trang mới để đảm bảo tính hệ thống.
+5. Toàn bộ nội dung sau khi cấu trúc lại và bổ sung liên kết phải trình bày rõ ràng dưới dạng sơ đồ cây (Hierarchy) phân cấp, sử dụng danh sách dấu chấm (bullet points) lồng nhau hợp lý.
+6. TUYỆT ĐỐI KHÔNG làm phá vỡ, ghi đè hoặc làm mất cấu trúc danh mục và các liên kết sẵn có của trang index.md hiện tại.
+7. Đầu ra phải là TOÀN BỘ nội dung Markdown mới của trang danh mục (không bao gồm frontmatter và không nằm trong khối code block \`\`\`, chỉ trả về text markdown thuần túy để lưu trực tiếp vào file).
+`;
+
+      const indexUser = `
+=== NỘI DUNG DANH MỤC HIỆN TẠI (index.md) ===
+${content}
+
+=== CÁC TRANG MỚI UPLOAD CẦN XẾP VÀO HIERARCHY ===
+${newPagesInfo.map(p => `- File: "${p.slug}.md", Tiêu đề: "${p.title}", Định nghĩa/Tóm tắt: "${p.definition}"`).join('\n')}
+`;
+
+      const updatedIndex = await callLLM(indexSystem, indexUser, false);
+      let cleanIndex = cleanMarkdownBlock(updatedIndex);
+
+      if (cleanIndex && cleanIndex.length > 20) {
+        await fs.writeFile(indexFilePath, stringifyFrontmatter(frontmatter, cleanIndex), 'utf-8');
+        console.log(`[Link Ingested Pages] Updated index.md with new hierarchical links.`);
+      }
+    }
+  } catch (err) {
+    console.error('Failed to update index.md in linkIngestedPages:', err);
+  }
+
+  // 6. AI contextual linking pass for all new files (linking keywords inside new pages to each other)
+  try {
+    const allSlugs = newSlugs.filter(s => s !== 'index' && s !== 'overview');
+    const allFiles = allSlugs.map(s => `${s}.md`);
+    const pageData = [];
+    for (const file of allFiles) {
+      const filePath = path.join(wikiDir, file);
+      if (existsSync(filePath)) {
+        const raw = await fs.readFile(filePath, 'utf-8');
+        const { content } = parseFrontmatter(raw);
+        const title = file.replace('.md', '').replace(/_/g, ' ');
+        pageData.push({
+          filename: file,
+          title,
+          content: content.trim()
+        });
+      }
+    }
+
+    for (const currentPage of pageData) {
+      const otherPages = pageData.filter(p => p.filename !== currentPage.filename);
+      if (otherPages.length === 0) continue;
+
+      const systemPrompt = `
+Bạn là chuyên gia biên soạn Wiki thông minh bằng tiếng Việt.
+Dưới đây là một trang tài liệu hiện tại trong Wiki: "${currentPage.filename}" (Tiêu đề: ${currentPage.title}).
+Và danh sách các trang khác trong cùng nhóm tài liệu:
+${otherPages.map(p => `- File: "${p.filename}", Tiêu đề: "${p.title}", Tóm tắt nội dung: ${p.content.substring(0, 300)}...`).join('\n')}
+
+Nhiệm vụ của bạn là phân tích nội dung trang hiện tại và đề xuất các vị trí có thể chèn liên kết dạng [Từ khóa](./tên_file.md) hoặc [[tên_file]] tới các trang khác trong nhóm tài liệu trên nếu từ khóa hoặc ý nghĩa của chúng xuất hiện trong văn bản.
+Hãy tìm từ khóa chính xác xuất hiện trong nội dung của trang hiện tại. Không được tự bịa ra từ khóa không tồn tại trong văn bản gốc.
+
+Trả về kết quả dưới dạng mảng JSON gồm các đề xuất thay thế. Ví dụ:
+[
+  {
+    "exactKeyword": "từ khóa chính xác trong nội dung",
+    "replacement": "[từ khóa chính xác trong nội dung](./tên_file.md)"
+  }
+]
+Chỉ trả về JSON, không kèm giải thích ngoài. Nếu không có đề xuất nào phù hợp, trả về mảng rỗng [].
+`;
+
+      const userPrompt = `
+Nội dung trang hiện tại ("${currentPage.filename}"):
+${currentPage.content}
+`;
+
+      try {
+        const responseText = await callLLM(systemPrompt, userPrompt, false);
+        const suggestions = parseLLMJSON(responseText);
+
+        if (Array.isArray(suggestions) && suggestions.length > 0) {
+          const filePath = path.join(wikiDir, currentPage.filename);
+          let rawContent = await fs.readFile(filePath, 'utf-8');
+          const { frontmatter, content } = parseFrontmatter(rawContent);
+          let updatedContent = content;
+          let changed = false;
+
+          for (const sug of suggestions) {
+            if (!sug.exactKeyword || !sug.replacement) continue;
+            if (updatedContent.includes(sug.exactKeyword)) {
+              // Avoid double link
+              const keywordEscaped = sug.exactKeyword.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+              const linkRegex = new RegExp(`\\[[^\\]]*${keywordEscaped}[^\\]]*\\]\\([^\\)]+\\)`, 'i');
+              const wikiLinkRegex = new RegExp(`\\[\\[[^\\]]*${keywordEscaped}[^\\]]*\\]\\]`, 'i');
+              if (linkRegex.test(updatedContent) || wikiLinkRegex.test(updatedContent)) {
+                continue;
+              }
+
+              updatedContent = updatedContent.replace(sug.exactKeyword, sug.replacement);
+              changed = true;
+            }
+          }
+
+          if (changed) {
+            await fs.writeFile(filePath, stringifyFrontmatter(frontmatter, updatedContent), 'utf-8');
+            console.log(`[Link Ingested Pages] Contextually linked keywords in ${currentPage.filename}`);
+            
+            try {
+              const cleanTitle = currentPage.filename.replace('.md', '').replace(/_/g, ' ');
+              await fs.appendFile(
+                logFilePath,
+                `\n- [${timestamp}] AI đã tự động chèn liên kết ngữ cảnh chéo vào [${cleanTitle}](${currentPage.filename}) sau khi nạp tài liệu thành công.\n`
+              );
+            } catch (err) {
+              console.error('Failed to append to log.md in linkIngestedPages:', err);
+            }
+          }
+        }
+      } catch (err) {
+        console.error(`Failed to process contextual links for ${currentPage.filename}:`, err);
+      }
+    }
+  } catch (err) {
+    console.error('Error during post-ingest contextual linking:', err);
+  }
+}
+
 async function processDocumentTask(task) {
   const { projectId, filename, filePath } = task;
 
@@ -444,6 +766,7 @@ async function processDocumentTask(task) {
 
   // 2. Run ingestion pipeline or txt compilation
   const isTxtFile = filename.toLowerCase().endsWith('.txt');
+  let newSlugs = [];
 
   if (isTxtFile) {
     console.log(`[Queue] Special conversion of .txt file to .md for ${filename}...`);
@@ -527,7 +850,7 @@ Nhiệm vụ của bạn là đọc nội dung văn bản thô bên dưới và 
       === CÁC LIÊN KẾT MỚI CẦN THÊM ===
       - [${mockConcept.name}](${mockConcept.slug}.md) : ${mockConcept.definition}
       `;
-      const updatedIndex = await callLLM(indexSystem, indexUser, false, 'openai');
+      const updatedIndex = await callLLM(indexSystem, indexUser, false);
       let cleanIndex = updatedIndex.trim();
       if (cleanIndex.startsWith('```markdown')) {
         cleanIndex = cleanIndex.slice(11);
@@ -548,7 +871,7 @@ Nhiệm vụ của bạn là đọc nội dung văn bản thô bên dưới và 
       const overviewSystem = `
       Bạn là chuyên gia tổng hợp tài liệu bằng tiếng Việt.
       Hãy cập nhật tệp tổng quan \`overview.md\` để tích hợp tóm tắt về các khái niệm mới được thêm vào Wiki, giúp người đọc nắm bắt nhanh cấu trúc kiến thức hiện có.
-      Giữ nguyên văn phong khoa học, rõ ràng và cấu trúc hiện tại của trang tổng quan.
+      Giữ nguyên văn văn phong khoa học, rõ ràng và cấu trúc hiện tại của trang tổng quan.
       Đầu ra phải là toàn bộ nội dung Markdown mới của tệp \`overview.md\`, không chứa giải thích bên ngoài.
       `;
       const overviewUser = `
@@ -558,7 +881,7 @@ Nhiệm vụ của bạn là đọc nội dung văn bản thô bên dưới và 
       === CÁC KHÁI NIỆM MỚI THÊM ===
       - **${mockConcept.name}**: ${mockConcept.definition}
       `;
-      const updatedOverview = await callLLM(overviewSystem, overviewUser, false, 'openai');
+      const updatedOverview = await callLLM(overviewSystem, overviewUser, false);
       let cleanOverview = updatedOverview.trim();
       if (cleanOverview.startsWith('```markdown')) {
         cleanOverview = cleanOverview.slice(11);
@@ -583,12 +906,22 @@ Nhiệm vụ của bạn là đọc nội dung văn bản thô bên dưới và 
     } catch (err) {
       console.error('Failed to write log.md for txt:', err);
     }
+
+    newSlugs = [mockConcept.slug];
   } else {
     console.log(`[Queue] Running ingest pipeline for ${filename}...`);
     const result = await runIngestPipeline(projectId, filename, text);
     if (!result || !result.success) {
       throw new Error(result ? result.message : 'Ingest pipeline failed.');
     }
+    newSlugs = result.slugs || [];
+  }
+
+  // 2.5. Perform post-ingestion linking (Overview, Wiki Index, and all new concept pages)
+  try {
+    await linkIngestedPages(projectId, newSlugs);
+  } catch (err) {
+    console.error('[Queue] Post-ingestion linking failed:', err);
   }
 
   // 3. Save hash to cache manifest to prevent redundant ingestion
@@ -868,10 +1201,10 @@ async function callLLMGemini(systemInstruction, userPrompt, jsonMode, useThinkin
 /**
  * Unified LLM caller supporting Gemini API and OpenAI API
  */
-async function callLLM(systemInstruction, userPrompt, jsonMode = false, forceProvider = null) {
+async function callLLM(systemInstruction, userPrompt, jsonMode = false) {
   const geminiKey = (appConfig.GEMINI_API_KEY || process.env.GEMINI_API_KEY || '').trim();
   const openaiKey = (appConfig.OPENAI_API_KEY || process.env.OPENAI_API_KEY || '').trim();
-  const provider = forceProvider || (appConfig.LLM_PROVIDER || process.env.LLM_PROVIDER || (geminiKey ? 'gemini' : 'openai')).trim();
+  const provider = (appConfig.LLM_PROVIDER || process.env.LLM_PROVIDER || (geminiKey ? 'gemini' : 'openai')).trim();
 
   if (provider === 'gemini' && geminiKey) {
     try {
@@ -1268,7 +1601,7 @@ async function runIngestPipeline(projectId, sourceName, text) {
       === CÁC LIÊN KẾT MỚI CẦN THÊM ===
       ${mergedConcepts.map(c => `- [${c.name}](${c.slug}.md) : ${c.definition}`).join('\n')}
       `;
-      const updatedIndex = await callLLM(indexSystem, indexUser, false, 'openai');
+      const updatedIndex = await callLLM(indexSystem, indexUser, false);
       await fs.writeFile(indexFilePath, updatedIndex);
     } catch (err) {
       console.error('Failed to update index.md:', err);
@@ -1291,7 +1624,7 @@ async function runIngestPipeline(projectId, sourceName, text) {
       === CÁC KHÁI NIỆM MỚI THÊM ===
       ${mergedConcepts.map(c => `- **${c.name}**: ${c.definition}`).join('\n')}
       `;
-      const updatedOverview = await callLLM(overviewSystem, overviewUser, false, 'openai');
+      const updatedOverview = await callLLM(overviewSystem, overviewUser, false);
       await fs.writeFile(overviewFilePath, updatedOverview);
     } catch (err) {
       console.error('Failed to update overview.md:', err);
@@ -1313,6 +1646,7 @@ async function runIngestPipeline(projectId, sourceName, text) {
     return {
       success: true,
       message: `Ingested ${mergedConcepts.length} concepts successfully.`,
+      slugs: mergedConcepts.map(c => c.slug)
     };
   });
 }
@@ -2445,9 +2779,9 @@ app.get('/api/projects/:id/graph', async (req, res) => {
       }
     }
 
-    // Mark orphans (any node other than index, overview, log with no connections to any other page)
+    // Mark orphans (any node other than index, overview, purpose with no connections to any other page)
     nodes.forEach(n => {
-      if (n.id !== 'index' && n.id !== 'overview' && !hasConnection[n.id]) {
+      if (n.id !== 'index' && n.id !== 'overview' && n.id !== 'purpose' && !hasConnection[n.id]) {
         n.isOrphan = true;
       }
     });
@@ -2637,7 +2971,7 @@ app.get('/api/projects/:id/maintenance', async (req, res) => {
     // Identify Orphans (any node with no incoming and no outgoing connections to other pages)
     const orphans = [];
     for (const file of mdFiles) {
-      if (inboundLinks[file].length === 0 && outboundLinks[file].length === 0) {
+      if (file !== 'purpose.md' && inboundLinks[file].length === 0 && outboundLinks[file].length === 0) {
         orphans.push({
           filename: file,
           title: pageTitles[file]
