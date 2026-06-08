@@ -375,6 +375,8 @@ const SettingsManager = {
 // 1.7. GOOGLE DRIVE IMPORT MODULE
 // ==========================================
 const GoogleDriveManager = {
+  isErrorState: false,
+
   init() {
     this.triggerBtn = document.getElementById('google-drive-trigger-btn');
     this.modal = document.getElementById('google-drive-modal');
@@ -404,9 +406,49 @@ const GoogleDriveManager = {
     }
   },
   
+  showErrorState(message) {
+    if (!this.triggerBtn) return;
+    if (this.isErrorState) return;
+    this.isErrorState = true;
+    
+    const originalStyle = this.triggerBtn.getAttribute('style') || '';
+    const originalHTML = this.triggerBtn.innerHTML;
+    
+    // Apply error styles
+    this.triggerBtn.style.background = 'rgba(239, 68, 68, 0.15)';
+    this.triggerBtn.style.color = '#ef4444';
+    this.triggerBtn.style.borderColor = 'rgba(239, 68, 68, 0.3)';
+    this.triggerBtn.setAttribute('title', message || 'Lỗi khi nạp từ Google Drive');
+    
+    const span = this.triggerBtn.querySelector('span');
+    if (span) {
+      span.textContent = 'Lỗi nạp Drive!';
+    }
+    
+    // Simple shake animation
+    let shakeCount = 0;
+    const shakeInterval = setInterval(() => {
+      this.triggerBtn.style.transform = shakeCount % 2 === 0 ? 'translateX(-4px)' : 'translateX(4px)';
+      shakeCount++;
+      if (shakeCount >= 6) {
+        clearInterval(shakeInterval);
+        this.triggerBtn.style.transform = '';
+      }
+    }, 80);
+    
+    // Revert styling after 4 seconds
+    setTimeout(() => {
+      this.triggerBtn.setAttribute('style', originalStyle);
+      this.triggerBtn.innerHTML = originalHTML;
+      this.triggerBtn.removeAttribute('title');
+      this.isErrorState = false;
+    }, 4000);
+  },
+  
   openModal() {
     if (!app.state.currentProjectId) {
       app.showToast('Vui lòng chọn hoặc tạo dự án trước khi nạp tài liệu!', 'warning');
+      this.showErrorState('Chưa chọn hoặc tạo dự án!');
       return;
     }
     this.modal.classList.remove('hidden');
@@ -455,6 +497,7 @@ const GoogleDriveManager = {
     } catch (err) {
       console.error(err);
       app.showToast(`Lỗi khi nạp từ Google Drive: ${err.message}`, 'error');
+      this.showErrorState(err.message);
     } finally {
       setTimeout(() => {
         WikiTreeManager.progressWrapper.classList.add('hidden');
@@ -473,6 +516,7 @@ const GoogleDriveManager = {
       
       if (!apiKey || !clientId) {
         app.showToast('Vui lòng cấu hình Google API Key và Client ID trong mục Cài đặt trước.', 'warning');
+        this.showErrorState('Thiếu cấu hình Google API Key/Client ID');
         return;
       }
       
@@ -486,6 +530,7 @@ const GoogleDriveManager = {
           if (response.error !== undefined) {
             console.error('GIS Error:', response);
             app.showToast('Không thể xác thực tài khoản Google.', 'error');
+            this.showErrorState('Lỗi xác thực Google');
             return;
           }
           const accessToken = response.access_token;
@@ -497,6 +542,7 @@ const GoogleDriveManager = {
     } catch (err) {
       console.error(err);
       app.showToast(`Không thể khởi chạy Google Picker: ${err.message}`, 'error');
+      this.showErrorState(err.message);
     }
   },
   
@@ -536,6 +582,7 @@ const GoogleDriveManager = {
       } catch (err) {
         console.error('Lỗi khi mở Picker:', err);
         app.showToast('Không thể hiển thị Google Drive Picker.', 'error');
+        this.showErrorState(err.message || 'Lỗi hiển thị Picker');
       }
     });
   },
@@ -576,6 +623,7 @@ const GoogleDriveManager = {
     } catch (err) {
       console.error(err);
       app.showToast(`Lỗi khi nạp tệp từ Google Drive: ${err.message}`, 'error');
+      this.showErrorState(err.message);
     } finally {
       setTimeout(() => {
         WikiTreeManager.progressWrapper.classList.add('hidden');
