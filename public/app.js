@@ -1457,13 +1457,8 @@ const WikiTreeManager = {
           </li>
         `;
       } else {
-        const hasAnySuggestions = this.currentOrphans.some(o => o.suggestions && o.suggestions.length > 0);
         if (this.autoLinkAllBtn) {
-          if (hasAnySuggestions) {
-            this.autoLinkAllBtn.classList.remove('hidden');
-          } else {
-            this.autoLinkAllBtn.classList.add('hidden');
-          }
+          this.autoLinkAllBtn.classList.remove('hidden');
         }
         data.orphans.forEach(orph => {
           const li = document.createElement('li');
@@ -1590,22 +1585,18 @@ const WikiTreeManager = {
       return;
     }
 
-    const orphansWithSuggestions = this.currentOrphans.filter(o => o.suggestions && o.suggestions.length > 0);
-    if (orphansWithSuggestions.length === 0) {
-      app.showToast('Không có đề xuất kết nối AI nào cho các trang mồ côi hiện tại.', 'info');
-      return;
-    }
+    const orphansToProcess = this.currentOrphans;
 
     const originalHtml = this.autoLinkAllBtn.innerHTML;
     this.autoLinkAllBtn.disabled = true;
-    this.autoLinkAllBtn.innerHTML = '<i data-lucide="loader" class="animate-spin" style="width: 12px; height: 12px;"></i><span>Đang liên kết...</span>';
+    this.autoLinkAllBtn.innerHTML = '<i data-lucide="loader" class="animate-spin" style="width: 12px; height: 12px;"></i><span>AI đang phân tích & liên kết...</span>';
     lucide.createIcons();
 
     try {
       const res = await fetch(`/api/projects/${projId}/wiki/auto-link-all`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orphans: orphansWithSuggestions })
+        body: JSON.stringify({ orphans: orphansToProcess })
       });
 
       if (!res.ok) {

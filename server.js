@@ -2645,50 +2645,7 @@ app.get('/api/projects/:id/maintenance', async (req, res) => {
       }
     }
 
-    // Call LLM for orphan connection suggestions if there are orphans
-    let orphanSuggestions = {};
-    if (orphans.length > 0) {
-      const conceptsList = mdFiles.map(file => ({
-        filename: file,
-        title: pageTitles[file]
-      }));
-
-      const orphanSystem = `
-      Bạn là chuyên gia cấu trúc cơ sở tri thức bằng tiếng Việt.
-      Hãy xem xét danh sách các "trang mồ côi" (trang không có liên kết tới hoặc từ bất kỳ trang nào khác) và danh sách tất cả các trang hiện có trong Wiki.
-      Đề xuất 1-2 trang thích hợp nhất nên liên kết tới mỗi trang mồ côi này để tích hợp chúng vào sơ đồ tri thức chung.
-      Đầu ra phải là một đối tượng JSON có định dạng:
-      {
-        "suggestions": {
-          "ten_file_mo_coi.md": [
-            {
-              "target": "ten_file_lien_ket.md",
-              "reason": "Mô tả ngắn gọn lý do liên kết (1 câu)"
-            }
-          ]
-        }
-      }
-      Chỉ trả về JSON, không kèm giải thích ngoài.
-      `;
-
-      const orphanUser = `
-      Danh sách các trang mồ côi cần liên kết:
-      ${JSON.stringify(orphans, null, 2)}
-
-      Danh sách tất cả các trang trong Wiki:
-      ${JSON.stringify(conceptsList, null, 2)}
-      `;
-
-      try {
-        const responseText = await callLLM(orphanSystem, orphanUser, true);
-        const parsed = parseLLMJSON(responseText);
-        if (parsed && parsed.suggestions) {
-          orphanSuggestions = parsed.suggestions;
-        }
-      } catch (err) {
-        console.error('Failed to get orphan suggestions:', err);
-      }
-    }
+    // No longer calling LLM for orphan connection suggestions during maintenance scan.
 
     // Call LLM for investigation gaps
     let gaps = [];
@@ -2731,7 +2688,7 @@ app.get('/api/projects/:id/maintenance', async (req, res) => {
 
     const orphansWithSuggestions = orphans.map(o => ({
       ...o,
-      suggestions: orphanSuggestions[o.filename] || []
+      suggestions: []
     }));
 
     // Save results to maintenance.json for graph visualization
@@ -2894,101 +2851,124 @@ app.post('/api/projects/:id/wiki/auto-link-all', async (req, res) => {
     const logFilePath = path.join(wikiDir, 'log.md');
     const timestamp = new Date().toISOString();
     const existingFiles = await fs.readdir(wikiDir);
+    const mdFiles = existingFiles.filter(f => f.endsWith('.md'));
+
+    // Read all other pages' summaries/contents for AI context
+    const allPagesData = [];
+    for (const file of mdFiles) {
+      if (file === 'log.md' || file === 'index.md' || file === 'overview.md') continue;
+      const content = await fs.readFile(path.join(wikiDir, file), 'utf-8');
+      const { frontmatter, content: pureContent } = parseFrontmatter(content);
+      const title = frontmatter.title || file;
+      allPagesData.push(`File: ${file}\nTiêu đề: ${title}\nContent: ${pureContent.substring(0, 1500)}...`);
+    }
+
+    const contextContent = allPagesData.join('\n\n---\n\n');
 
     for (const orph of orphans) {
-      const { filename: orphanFilename, title: orphanTitle, suggestions } = orph;
-      if (!orphanFilename || !suggestions || !Array.isArray(suggestions) || suggestions.length === 0) {
-        continue;
-      }
+      const { filename: orphanFilename, title: orphanTitle } = orph;
+      if (!orphanFilename) continue;
+      
+      const orphanPath = path.join(wikiDir, orphanFilename);
+      if (!existsSync(orphanPath)) continue;
+      
+      const orphanContent = await fs.readFile(orphanPath, 'utf-8');
+      const { content: pureOrphanContent } = parseFrontmatter(orphanContent);
 
-      for (const sug of suggestions) {
-        let targetFilename = sug.target;
-        const reason = sug.reason;
-        if (!targetFilename) continue;
+      const systemPrompt = `
+      Bạn là chuyên gia phân tích và kết nối tri thức. Nhiệm vụ của bạn là liên kết một "trang mồ côi" vào hệ thống Wiki hiện tại.
+      Đọc nội dung trang mồ côi và nội dung các trang khác.
+      Tìm MỘT trang khác có nội dung liên quan mật thiết nhất đến chủ đề của trang mồ côi (có thể dựa trên tiêu đề hoặc nội dung).
+      Sau đó, tìm MỘT TỪ KHÓA HOẶC CỤM TỪ CỤ THỂ đang có sẵn trong nội dung của trang đích, và đề xuất thay thế từ khóa đó thành một wikilink tới trang mồ côi.
+      Ví dụ, nếu trang đích có chữ "containerization" và trang mồ côi là "Docker_Container.md", bạn hãy trả về từ khóa "containerization" và nội dung thay thế là "[containerization](./Docker_Container.md)".
 
-        // Normalize target filename
-        targetFilename = path.basename(targetFilename.trim());
-        if (!targetFilename.endsWith('.md')) {
-          targetFilename += '.md';
+      LƯU Ý QUAN TRỌNG:
+      1. Từ khóa bạn chọn (exactKeyword) PHẢI TỒN TẠI CHÍNH XÁC trong nội dung trang đích (không tính phần metadata/frontmatter). Nó phân biệt hoa thường và dấu cách, hãy trích xuất y nguyên.
+      2. Nên tìm những từ khóa liên quan đến trang mồ côi.
+      3. Nếu không tìm được vị trí nào phù hợp để chèn, hãy trả về mảng rỗng [].
+
+      Đầu ra phải là một mảng JSON có định dạng:
+      [
+        {
+          "targetFile": "ten_file_dich.md",
+          "exactKeyword": "từ khóa chính xác trong file đích",
+          "replacement": "[từ khóa chính xác trong file đích](./ten_file_mo_coi.md)"
         }
+      ]
+      Chỉ trả về JSON, không kèm giải thích ngoài.
+      `;
 
-        // Case-insensitive lookup
-        const matchedFile = existingFiles.find(
-          f => f.toLowerCase() === targetFilename.toLowerCase()
-        );
+      const userPrompt = `
+      Trang mồ côi cần kết nối: ${orphanFilename}
+      Nội dung trang mồ côi:
+      ${pureOrphanContent.substring(0, 1500)}
 
-        if (!matchedFile) {
-          console.warn(`[Auto-Link All] Suggested target file not found: ${sug.target}`);
-          continue;
-        }
+      Nội dung các trang khác (đã cắt bớt):
+      ${contextContent}
+      `;
 
-        // Skip linking page to itself
-        if (matchedFile.toLowerCase() === orphanFilename.toLowerCase()) {
-          continue;
-        }
+      try {
+        const responseText = await callLLM(systemPrompt, userPrompt, true);
+        const suggestions = parseLLMJSON(responseText);
 
-        const targetPath = path.join(wikiDir, matchedFile);
-        let rawContent = await fs.readFile(targetPath, 'utf-8');
-        const { frontmatter, content } = parseFrontmatter(rawContent);
+        if (Array.isArray(suggestions) && suggestions.length > 0) {
+          for (const sug of suggestions) {
+            let targetFilename = sug.targetFile;
+            if (!targetFilename) continue;
+            targetFilename = path.basename(targetFilename.trim());
+            if (!targetFilename.endsWith('.md')) {
+              targetFilename += '.md';
+            }
 
-        // Check if target page already links to the orphan page (case insensitive check for filename)
-        const orphanBase = orphanFilename.toLowerCase();
-        if (content.toLowerCase().includes(orphanBase)) {
-          continue; // already linked
-        }
+            const matchedFile = existingFiles.find(
+              f => f.toLowerCase() === targetFilename.toLowerCase()
+            );
 
-        // Check if "Xem thêm" or "Liên kết" exists in content
-        const seeAlsoRegex = /^(#{2,4})\s+(Xem thêm|Liên kết|Tài liệu liên quan|Tham khảo)\b/im;
-        const match = content.match(seeAlsoRegex);
+            if (!matchedFile || matchedFile.toLowerCase() === orphanFilename.toLowerCase()) {
+              continue;
+            }
 
-        let newContent;
-        if (match) {
-          // Find the index in content
-          const headerText = match[0];
-          const headerIndex = content.indexOf(headerText);
-          const nextLineIndex = content.indexOf('\n', headerIndex);
+            const targetPath = path.join(wikiDir, matchedFile);
+            let rawTargetContent = await fs.readFile(targetPath, 'utf-8');
+            const { frontmatter, content } = parseFrontmatter(rawTargetContent);
 
-          let insertIndex = nextLineIndex;
-          if (nextLineIndex === -1) {
-            insertIndex = content.length;
+            if (!content.includes(sug.exactKeyword)) {
+              console.warn(`[Auto-Link All] Exact keyword "${sug.exactKeyword}" not found in ${matchedFile}`);
+              continue;
+            }
+
+            // Perform a replacement only on the first match to avoid messing up formatting
+            const newContent = content.replace(sug.exactKeyword, sug.replacement);
+            if (newContent !== content) {
+              const finalPageContent = stringifyFrontmatter(frontmatter, newContent);
+              await fs.writeFile(targetPath, finalPageContent, 'utf-8');
+              if (!updatedTargets.includes(matchedFile)) {
+                updatedTargets.push(matchedFile);
+              }
+
+              // Log to log.md
+              try {
+                const targetCleanName = matchedFile.replace('.md', '').replace(/_/g, ' ');
+                await fs.appendFile(
+                  logFilePath,
+                  `\n- [${timestamp}] AI đã tự động chèn liên kết ngữ cảnh vào [${targetCleanName}](${matchedFile}) tới trang mồ côi [${orphanTitle}](${orphanFilename})\n`
+                );
+              } catch (err) {
+                console.error('Failed to append to log.md in auto-link-all:', err);
+              }
+            }
           }
-
-          const linkLine = `\n- [${orphanTitle}](./${orphanFilename}) — ${reason}`;
-          newContent = content.slice(0, insertIndex) + linkLine + content.slice(insertIndex);
-        } else {
-          // Ensure nice spacing
-          let suffix = '';
-          if (!content.endsWith('\n')) {
-            suffix += '\n';
-          }
-          suffix += `\n### Xem thêm\n- [${orphanTitle}](./${orphanFilename}) — ${reason}\n`;
-          newContent = content + suffix;
         }
-
-        const finalPageContent = stringifyFrontmatter(frontmatter, newContent);
-        await fs.writeFile(targetPath, finalPageContent, 'utf-8');
-        if (!updatedTargets.includes(matchedFile)) {
-          updatedTargets.push(matchedFile);
-        }
-
-        // Log to log.md
-        try {
-          const targetCleanName = matchedFile.replace('.md', '').replace(/_/g, ' ');
-          await fs.appendFile(
-            logFilePath,
-            `\n- [${timestamp}] Đã tạo liên kết tự động từ [${targetCleanName}](${matchedFile}) tới trang mồ côi [${orphanTitle}](${orphanFilename})\n`
-          );
-        } catch (err) {
-          console.error('Failed to append to log.md in auto-link-all:', err);
-        }
+      } catch (err) {
+        console.error('Failed to process orphan with AI in auto-link-all:', err);
       }
     }
 
     if (updatedTargets.length === 0) {
-      return res.json({ success: true, message: 'Không có liên kết mới nào được tạo (liên kết đã tồn tại hoặc tệp đích không hợp lệ).', updatedTargets });
+      return res.json({ success: true, message: 'Không có liên kết mới nào được tạo (không tìm thấy từ khóa chính xác trong ngữ cảnh hoặc AI không có đề xuất).', updatedTargets });
     }
 
-    res.json({ success: true, message: 'Đã tự động liên kết tất cả trang mồ côi thành công!', updatedTargets });
+    res.json({ success: true, message: 'Đã tự động liên kết ngữ cảnh các trang mồ côi thành công!', updatedTargets });
   } catch (error) {
     console.error('Error in auto-linking all:', error);
     res.status(500).json({ error: 'Failed to auto-link all pages' });
