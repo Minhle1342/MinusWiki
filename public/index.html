@@ -499,14 +499,16 @@
   </div>
 
   <!-- Google Drive Modal -->
-  <div class="modal hidden" id="google-drive-modal">
-    <div class="modal-content glass-effect" style="max-width: 500px;">
+  <div class="modal-overlay hidden" id="google-drive-modal">
+    <div class="modal-box glass-card" style="max-width: 500px;">
       <div class="modal-header">
         <h3 class="modal-title">
           <i data-lucide="chrome" style="color: #10b981; vertical-align: middle; margin-right: 6px;"></i>
           Nạp tài liệu từ Google Drive
         </h3>
-        <button type="button" class="btn-close" id="btn-close-google-modal">&times;</button>
+        <button class="modal-close" id="btn-close-google-modal">
+          <i data-lucide="x"></i>
+        </button>
       </div>
       <div class="modal-body" style="padding: 20px;">
         <div class="tab-container" style="margin-bottom: 20px;">
