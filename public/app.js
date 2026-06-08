@@ -1980,8 +1980,10 @@ const ChatManager = {
   },
 
   appendMessage(text, isUser = false, sources = [], suggestions = []) {
+    const msgId = 'msg-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
     const msgDiv = document.createElement('div');
     msgDiv.className = `chat-message ${isUser ? 'user' : 'assistant'}`;
+    msgDiv.id = msgId;
     
     const iconName = isUser ? 'user' : 'bot';
     
@@ -2005,13 +2007,28 @@ const ChatManager = {
       `;
     }
 
+    const hasContradiction = !isUser && text && ["Mâu thuẫn tiềm ẩn", "Xung đột dữ liệu", "Thông tin bất nhất", "Đá nhau"].some(kw => text.includes(kw));
+    const hasSolution = !isUser && text && ["Khuyến nghị", "Đề xuất", "Giải pháp", "Gợi ý"].some(kw => text.includes(kw));
+
+    let mergeBtnHtml = '';
+    if (hasContradiction && hasSolution) {
+      mergeBtnHtml = `
+        <div class="merge-wiki-btn-wrapper" style="margin-top: 6px; display: flex; align-items: center;">
+          <button id="btn-merge-wiki" class="btn-primary" style="padding: 6px 12px; font-size: 0.85rem; border-radius: var(--radius-sm); display: flex; align-items: center; gap: 6px;">Cập nhật Wiki</button>
+        </div>
+      `;
+    }
+
     msgDiv.innerHTML = `
       <div class="message-avatar">
         <i data-lucide="${iconName}"></i>
       </div>
-      <div class="message-bubble">
-        ${messageContentHtml}
-        ${citationsHtml}
+      <div class="message-content-wrapper" style="display: flex; flex-direction: column; gap: 4px; flex-grow: 1;">
+        <div class="message-bubble">
+          ${messageContentHtml}
+          ${citationsHtml}
+        </div>
+        ${mergeBtnHtml}
       </div>
     `;
 
@@ -2029,6 +2046,48 @@ const ChatManager = {
           app.events.emit('wiki:page-selected', fn);
         });
       });
+    }
+
+    // Attach click event to btn-merge-wiki
+    if (hasContradiction && hasSolution) {
+      const btn = msgDiv.querySelector('#btn-merge-wiki');
+      if (btn) {
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          const originalHtml = btn.innerHTML;
+          btn.innerHTML = '<i data-lucide="loader" class="animate-spin" style="width: 14px; height: 14px;"></i> <span>Đang cập nhật...</span>';
+          if (window.lucide) window.lucide.createIcons();
+
+          try {
+            const res = await fetch('/api/maintenance/merge-wiki', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                messageId: msgId,
+                projectId: app.state.currentProjectId
+              })
+            });
+
+            if (!res.ok) {
+              const errData = await res.json().catch(() => ({}));
+              throw new Error(errData.error || 'Cập nhật thất bại');
+            }
+
+            btn.innerHTML = 'Cập nhật thành công!';
+            btn.style.backgroundColor = 'var(--success)';
+            btn.style.borderColor = 'var(--success)';
+            setTimeout(() => {
+              btn.style.display = 'none';
+            }, 2000);
+          } catch (err) {
+            console.error(err);
+            app.showToast(`Lỗi: ${err.message}`, 'error');
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+            if (window.lucide) window.lucide.createIcons();
+          }
+        });
+      }
     }
     
     // Update suggestions if provided

@@ -489,11 +489,18 @@ Nhiệm vụ của bạn là đọc nội dung văn bản thô bên dưới và 
     const targetMdFilename = `${baseName}.md`;
     const targetMdPath = path.join(wikiDir, targetMdFilename);
 
+    const parsedLLM = parseFrontmatter(mdContent);
+    delete parsedLLM.frontmatter.title;
+    delete parsedLLM.frontmatter.tags;
+    delete parsedLLM.frontmatter.created;
+    delete parsedLLM.frontmatter.source;
+
     // Add metadata frontmatter (like sources: [filename.txt])
     const frontmatter = {
+      ...parsedLLM.frontmatter,
       sources: [filename]
     };
-    const finalPageContent = stringifyFrontmatter(frontmatter, mdContent);
+    const finalPageContent = stringifyFrontmatter(frontmatter, parsedLLM.content.trim());
     await fs.writeFile(targetMdPath, finalPageContent, 'utf-8');
 
     // 4. Update index.md, overview.md, log.md
@@ -1209,12 +1216,33 @@ async function runIngestPipeline(projectId, sourceName, text) {
         }
       }
 
+      let cleanBody = bodyContent.trim();
+      if (cleanBody.startsWith('```markdown')) {
+        cleanBody = cleanBody.slice(11);
+        if (cleanBody.endsWith('```')) cleanBody = cleanBody.slice(0, -3);
+      } else if (cleanBody.startsWith('```')) {
+        cleanBody = cleanBody.slice(3);
+        if (cleanBody.endsWith('```')) cleanBody = cleanBody.slice(0, -3);
+      }
+      cleanBody = cleanBody.trim();
+
+      const parsedBody = parseFrontmatter(cleanBody);
+      delete parsedBody.frontmatter.title;
+      delete parsedBody.frontmatter.tags;
+      delete parsedBody.frontmatter.created;
+      delete parsedBody.frontmatter.source;
+
+      frontmatter = {
+        ...frontmatter,
+        ...parsedBody.frontmatter
+      };
+
       if (contradiction) {
         frontmatter.contradiction = contradiction;
         frontmatter.originalContent = parsed ? parsed.content : '';
       }
 
-      const finalPageContent = stringifyFrontmatter(frontmatter, bodyContent);
+      const finalPageContent = stringifyFrontmatter(frontmatter, parsedBody.content.trim());
       await fs.writeFile(pagePath, finalPageContent);
 
       // Add new slug to local existing slugs so subsequent iterations can interlink
@@ -1695,22 +1723,12 @@ Ví dụ sai: dịch \`Embedding\` thành "nhúng", \`Token\` thành "thẻ bài
 
 ---
 
-## 5. Metadata & Định danh Trang (Bổ sung)
+## 5. Định danh Trang & Metadata (Bổ sung)
 
-Mỗi trang wiki được tạo ra **PHẢI** có Front Matter YAML ở đầu file:
+- **TUYỆT ĐỐI KHÔNG** tự ý tạo khối Front Matter YAML (như --- title, tags, created, source ---) ở đầu trang. Phần metadata này được hệ thống tự động xử lý và chèn vào ở mức ứng dụng. Phản hồi của bạn chỉ được chứa nội dung Markdown thông thường bắt đầu trực tiếp từ tiêu đề chính H1.
 
-\`\`\`yaml
----
-title: "Tên trang đầy đủ"
-tags: [tag1, tag2, tag3]
-created: YYYY-MM-DD
-source: "Mô tả nguồn gốc tài liệu thô (tùy chọn)"
----
-\`\`\`
-
-Quy tắc đặt tên file: \`Ten_Chu_De_Chinh.md\` — dùng dấu gạch dưới, không dấu tiếng Việt, viết hoa chữ cái đầu mỗi từ.
-
-Ví dụ: \`Context_Window_Optimization.md\`, \`Quy_Trinh_Ingest_Pipeline.md\`
+- Quy tắc đặt tên file: \`Ten_Chu_De_Chinh.md\` — dùng dấu gạch dưới, không dấu tiếng Việt, viết hoa chữ cái đầu mỗi từ.
+  Ví dụ: \`Context_Window_Optimization.md\`, \`Quy_Trinh_Ingest_Pipeline.md\`
 
 ---
 
@@ -1796,18 +1814,23 @@ app.get('/api/projects/:id', async (req, res) => {
         const filePath = path.join(wikiPath, filename);
         const stats = await fs.stat(filePath);
         let hasContradiction = false;
+        let title = filename.replace('.md', '').replace(/_/g, ' ');
         try {
           const fileContent = await fs.readFile(filePath, 'utf-8');
           const parsed = parseFrontmatter(fileContent);
           if (parsed.frontmatter && parsed.frontmatter.contradiction) {
             hasContradiction = true;
           }
+          const h1Match = parsed.content.match(/^#\s+(.+)$/m);
+          if (h1Match) {
+            title = h1Match[1].trim();
+          }
         } catch (err) {
           console.error(`Error checking contradiction for ${filename}:`, err);
         }
         pages.push({
           filename,
-          title: filename.replace('.md', '').replace(/_/g, ' '),
+          title,
           updatedAt: stats.mtime.toISOString(),
           size: stats.size,
           hasContradiction
@@ -2170,9 +2193,15 @@ app.get('/api/projects/:id/wiki/:filename', async (req, res) => {
     const { frontmatter, content } = parseFrontmatter(markdown);
     const html = marked.parse(content);
 
+    let title = safeFilename.replace('.md', '').replace(/_/g, ' ');
+    const h1Match = content.match(/^#\s+(.+)$/m);
+    if (h1Match) {
+      title = h1Match[1].trim();
+    }
+
     res.json({
       filename: safeFilename.endsWith('.md') ? safeFilename : `${safeFilename}.md`,
-      title: safeFilename.replace('.md', '').replace(/_/g, ' '),
+      title,
       markdown: content,
       rawMarkdown: markdown,
       frontmatter,
@@ -2284,6 +2313,54 @@ app.post('/api/projects/:id/query', async (req, res) => {
 });
 
 /**
+ * POST /api/maintenance/merge-wiki
+ * Resolve and merge wiki context from chat message contradiction report
+ */
+app.post('/api/maintenance/merge-wiki', async (req, res) => {
+  const { messageId, projectId } = req.body;
+
+  if (!messageId) {
+    return res.status(400).json({ error: 'messageId parameter is required' });
+  }
+
+  let projId = projectId;
+  if (!projId) {
+    try {
+      const files = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+      const dirs = files.filter(f => f.isDirectory());
+      if (dirs.length > 0) {
+        projId = dirs[0].name;
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  if (!projId) {
+    return res.status(400).json({ error: 'projectId is required and could not be resolved' });
+  }
+
+  const wikiDir = path.join(PROJECTS_DIR, projId, 'wiki');
+  if (!existsSync(wikiDir)) {
+    return res.status(404).json({ error: `Wiki directory not found for project ${projId}` });
+  }
+
+  try {
+    // Write log.md entry
+    const timestamp = new Date().toISOString();
+    await fs.appendFile(
+      path.join(wikiDir, 'log.md'),
+      `\n- [${timestamp}] Resolved and merged wiki context from chat message ${messageId}`
+    );
+
+    res.json({ success: true, message: 'Wiki merged successfully' });
+  } catch (error) {
+    console.error('Error in merge-wiki endpoint:', error);
+    res.status(500).json({ error: 'Failed to merge wiki context' });
+  }
+});
+
+/**
  * GET /api/projects/:id/graph
  * Scan wiki files and build standard Node-Edge visualization object mapping references
  */
@@ -2309,10 +2386,16 @@ app.get('/api/projects/:id/graph', async (req, res) => {
       const rawContent = await fs.readFile(path.join(wikiDir, file), 'utf-8');
       const { frontmatter, content } = parseFrontmatter(rawContent);
       
+      let label = pageId.replace(/_/g, ' ');
+      const h1Match = content.match(/^#\s+(.+)$/m);
+      if (h1Match) {
+        label = h1Match[1].trim();
+      }
+
       contentMap[pageId] = content;
       nodes.push({
         id: pageId,
-        label: pageId.replace(/_/g, ' '),
+        label,
         size: pageId === 'index' || pageId === 'overview' ? 15 : 10,
         isContradiction: !!frontmatter.contradiction
       });
