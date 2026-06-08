@@ -1864,8 +1864,10 @@ const GraphManager = {
     this.g.selectAll(".graph-link").classed("highlighted", false);
 
     // Add active styles
-    this.g.select("#" + CSS.escape(`node-${activeId}`)).classed("active", true);
-    this.g.select("#" + CSS.escape(`label-${activeId}`)).classed("active", true);
+    const nodeEl = document.getElementById(`node-${activeId}`);
+    const labelEl = document.getElementById(`label-${activeId}`);
+    if (nodeEl) d3.select(nodeEl).classed("active", true);
+    if (labelEl) d3.select(labelEl).classed("active", true);
 
     // Highlight links connected to this active node
     this.g.selectAll(".graph-link").each(function(l) {
