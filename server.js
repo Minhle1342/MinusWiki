@@ -2409,10 +2409,12 @@ app.get('/api/projects/:id/graph', async (req, res) => {
       });
     }
 
-    // Detect links in content and compute inDegree
+    // Detect links in content, compute inDegree and track node connections
     const inDegree = {};
+    const hasConnection = {};
     nodes.forEach(n => {
       inDegree[n.id] = 0;
+      hasConnection[n.id] = false;
     });
 
     for (const file of mdFiles) {
@@ -2435,15 +2437,17 @@ app.get('/api/projects/:id/graph', async (req, res) => {
             });
             if (targetId !== sourceId) {
               inDegree[targetId] = (inDegree[targetId] || 0) + 1;
+              hasConnection[sourceId] = true;
+              hasConnection[targetId] = true;
             }
           }
         }
       }
     }
 
-    // Mark orphans (any node other than index, overview, log with 0 inDegree)
+    // Mark orphans (any node other than index, overview, log with no connections to any other page)
     nodes.forEach(n => {
-      if (n.id !== 'index' && n.id !== 'overview' && inDegree[n.id] === 0) {
+      if (n.id !== 'index' && n.id !== 'overview' && !hasConnection[n.id]) {
         n.isOrphan = true;
       }
     });
@@ -2582,11 +2586,13 @@ app.get('/api/projects/:id/maintenance', async (req, res) => {
 
     const pageTitles = {};
     const inboundLinks = {};
+    const outboundLinks = {};
     const contradictions = [];
 
-    // Initialize inbounds
+    // Initialize inbounds and outbounds
     for (const file of mdFiles) {
       inboundLinks[file] = [];
+      outboundLinks[file] = [];
     }
 
     // Scan links and contradictions
@@ -2621,14 +2627,17 @@ app.get('/api/projects/:id/maintenance', async (req, res) => {
           if (!inboundLinks[targetFilename].includes(file)) {
             inboundLinks[targetFilename].push(file);
           }
+          if (!outboundLinks[file].includes(targetFilename)) {
+            outboundLinks[file].push(targetFilename);
+          }
         }
       }
     }
 
-    // Identify Orphans
+    // Identify Orphans (any node with no incoming and no outgoing connections to other pages)
     const orphans = [];
     for (const file of mdFiles) {
-      if (inboundLinks[file].length === 0) {
+      if (inboundLinks[file].length === 0 && outboundLinks[file].length === 0) {
         orphans.push({
           filename: file,
           title: pageTitles[file]
@@ -2646,7 +2655,7 @@ app.get('/api/projects/:id/maintenance', async (req, res) => {
 
       const orphanSystem = `
       Bạn là chuyên gia cấu trúc cơ sở tri thức bằng tiếng Việt.
-      Hãy xem xét danh sách các "trang mồ côi" (trang không có liên kết từ các trang khác) và danh sách tất cả các trang hiện có trong Wiki.
+      Hãy xem xét danh sách các "trang mồ côi" (trang không có liên kết tới hoặc từ bất kỳ trang nào khác) và danh sách tất cả các trang hiện có trong Wiki.
       Đề xuất 1-2 trang thích hợp nhất nên liên kết tới mỗi trang mồ côi này để tích hợp chúng vào sơ đồ tri thức chung.
       Đầu ra phải là một đối tượng JSON có định dạng:
       {
