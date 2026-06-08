@@ -2050,8 +2050,16 @@ app.post('/api/projects/:id/clip', async (req, res) => {
 
   try {
     const clipSlug = url.replace(/[^a-z0-9]/gi, '_').toLowerCase().substring(0, 100);
-    const sourceFileName = `clip_${clipSlug}.txt`;
-    const sourcePath = path.join(projectPath, 'sources', sourceFileName);
+    
+    // Find the next available index starting from 1
+    let index = 1;
+    let sourceFileName = `clip_${clipSlug}(${index}).txt`;
+    let sourcePath = path.join(projectPath, 'sources', sourceFileName);
+    while (existsSync(sourcePath)) {
+      index++;
+      sourceFileName = `clip_${clipSlug}(${index}).txt`;
+      sourcePath = path.join(projectPath, 'sources', sourceFileName);
+    }
 
     const fullContent = `URL: ${url}\nTitle: ${title || 'Web Clip'}\nClipped At: ${new Date().toISOString()}\n\n${text}`;
     await fs.writeFile(sourcePath, fullContent);
