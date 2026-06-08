@@ -527,7 +527,7 @@ Nhiệm vụ của bạn là đọc nội dung văn bản thô bên dưới và 
       === CÁC LIÊN KẾT MỚI CẦN THÊM ===
       - [${mockConcept.name}](${mockConcept.slug}.md) : ${mockConcept.definition}
       `;
-      const updatedIndex = await callLLM(indexSystem, indexUser, false);
+      const updatedIndex = await callLLM(indexSystem, indexUser, false, 'openai');
       let cleanIndex = updatedIndex.trim();
       if (cleanIndex.startsWith('```markdown')) {
         cleanIndex = cleanIndex.slice(11);
@@ -558,7 +558,7 @@ Nhiệm vụ của bạn là đọc nội dung văn bản thô bên dưới và 
       === CÁC KHÁI NIỆM MỚI THÊM ===
       - **${mockConcept.name}**: ${mockConcept.definition}
       `;
-      const updatedOverview = await callLLM(overviewSystem, overviewUser, false);
+      const updatedOverview = await callLLM(overviewSystem, overviewUser, false, 'openai');
       let cleanOverview = updatedOverview.trim();
       if (cleanOverview.startsWith('```markdown')) {
         cleanOverview = cleanOverview.slice(11);
@@ -868,10 +868,10 @@ async function callLLMGemini(systemInstruction, userPrompt, jsonMode, useThinkin
 /**
  * Unified LLM caller supporting Gemini API and OpenAI API
  */
-async function callLLM(systemInstruction, userPrompt, jsonMode = false) {
+async function callLLM(systemInstruction, userPrompt, jsonMode = false, forceProvider = null) {
   const geminiKey = (appConfig.GEMINI_API_KEY || process.env.GEMINI_API_KEY || '').trim();
   const openaiKey = (appConfig.OPENAI_API_KEY || process.env.OPENAI_API_KEY || '').trim();
-  const provider = (appConfig.LLM_PROVIDER || process.env.LLM_PROVIDER || (geminiKey ? 'gemini' : 'openai')).trim();
+  const provider = forceProvider || (appConfig.LLM_PROVIDER || process.env.LLM_PROVIDER || (geminiKey ? 'gemini' : 'openai')).trim();
 
   if (provider === 'gemini' && geminiKey) {
     try {
@@ -1268,7 +1268,7 @@ async function runIngestPipeline(projectId, sourceName, text) {
       === CÁC LIÊN KẾT MỚI CẦN THÊM ===
       ${mergedConcepts.map(c => `- [${c.name}](${c.slug}.md) : ${c.definition}`).join('\n')}
       `;
-      const updatedIndex = await callLLM(indexSystem, indexUser, false);
+      const updatedIndex = await callLLM(indexSystem, indexUser, false, 'openai');
       await fs.writeFile(indexFilePath, updatedIndex);
     } catch (err) {
       console.error('Failed to update index.md:', err);
@@ -1291,7 +1291,7 @@ async function runIngestPipeline(projectId, sourceName, text) {
       === CÁC KHÁI NIỆM MỚI THÊM ===
       ${mergedConcepts.map(c => `- **${c.name}**: ${c.definition}`).join('\n')}
       `;
-      const updatedOverview = await callLLM(overviewSystem, overviewUser, false);
+      const updatedOverview = await callLLM(overviewSystem, overviewUser, false, 'openai');
       await fs.writeFile(overviewFilePath, updatedOverview);
     } catch (err) {
       console.error('Failed to update overview.md:', err);
