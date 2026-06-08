@@ -1864,8 +1864,8 @@ const GraphManager = {
     this.g.selectAll(".graph-link").classed("highlighted", false);
 
     // Add active styles
-    this.g.select(`#node-${activeId}`).classed("active", true);
-    this.g.select(`#label-${activeId}`).classed("active", true);
+    this.g.select("#" + CSS.escape(`node-${activeId}`)).classed("active", true);
+    this.g.select("#" + CSS.escape(`label-${activeId}`)).classed("active", true);
 
     // Highlight links connected to this active node
     this.g.selectAll(".graph-link").each(function(l) {
