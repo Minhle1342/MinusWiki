@@ -1859,6 +1859,91 @@ async function syncProjectLanceDB(projectId) {
   }
 }
 
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Provenance Tracking (Trích xuất nguồn)
+ * Scans the generated answer text and matches it against the content of the loaded source files.
+ * Returns only the source files that are actually referenced, cited, or share significant text overlap.
+ */
+async function trackProvenance(answer, loadedSources, wikiDir) {
+  if (!answer) return [];
+  const verifiedSources = new Set();
+  
+  for (const page of loadedSources) {
+    const slug = page.replace('.md', '');
+    
+    // Check if the answer explicitly references the slug (e.g. [Title](slug.md) or similar)
+    const directLinkRegex = new RegExp(`\\[.*?\\]\\((?:\\./)?${escapeRegExp(slug)}\\.md\\)`, 'i');
+    if (directLinkRegex.test(answer) || answer.toLowerCase().includes(slug.toLowerCase() + '.md')) {
+      verifiedSources.add(page);
+      continue;
+    }
+
+    const pagePath = path.join(wikiDir, page);
+    if (!existsSync(pagePath)) continue;
+    
+    try {
+      const content = await fs.readFile(pagePath, 'utf-8');
+      
+      // Clean and normalize source text (lowercase, remove special chars, normalize whitespace)
+      const normalizedSource = content.toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+        .replace(/\s+/g, ' ');
+
+      // Split the answer into sentences (using simple delimiter logic)
+      const sentences = answer.split(/[.!?\n]+/g)
+        .map(s => s.trim())
+        .filter(s => s.length > 20);
+
+      let matched = false;
+      for (const sentence of sentences) {
+        // Clean and normalize the sentence
+        const cleanSentence = sentence.toLowerCase()
+          .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+          .replace(/\s+/g, ' ');
+        
+        if (cleanSentence.length < 15) continue;
+
+        // Direct substring check
+        if (normalizedSource.includes(cleanSentence)) {
+          matched = true;
+          break;
+        }
+
+        // Consecutive word phrase check: look for overlapping 6-word window
+        const words = cleanSentence.split(' ').filter(w => w.length > 0);
+        if (words.length >= 8) {
+          for (let i = 0; i <= words.length - 6; i++) {
+            const phrase = words.slice(i, i + 6).join(' ');
+            if (normalizedSource.includes(phrase)) {
+              matched = true;
+              break;
+            }
+          }
+        }
+        
+        if (matched) break;
+      }
+
+      if (matched) {
+        verifiedSources.add(page);
+      }
+    } catch (err) {
+      console.error(`Error checking provenance for ${page}:`, err);
+    }
+  }
+
+  // Fallback: If no sources were verified but we had loadedSources, keep the top one to avoid returning empty sources
+  if (verifiedSources.size === 0 && loadedSources.length > 0) {
+    verifiedSources.add(loadedSources[0]);
+  }
+
+  return Array.from(verifiedSources);
+}
+
 /**
  * Query Retrieval Pipeline (4 phases)
  * Searches the wiki pages, synthesizes a reply, and suggests follow-up actions.
@@ -2287,9 +2372,10 @@ async function runQueryPipeline(projectId, query, contextFiles, history = [], ac
   try {
     const answerResponse = await callLLM(synthesisSystem, synthesisUser, true);
     const parsedAnswer = parseLLMJSON(answerResponse);
+    const verifiedSources = await trackProvenance(parsedAnswer.answer, loadedSources, wikiDir);
     return {
       answer: parsedAnswer.answer,
-      sources: loadedSources.map(s => s.replace('.md', '')),
+      sources: verifiedSources.map(s => s.replace('.md', '')),
       suggestions: parsedAnswer.suggestions || [],
       metadata: parsedAnswer.metadata || { entities: [], concepts: [], actions: [] }
     };

@@ -8,6 +8,7 @@ const app = {
     currentProjectId: null,
     currentWikiFilename: null,
     projectsList: [],
+    pages: [],
     activeTab: 'pages' // 'pages', 'sources', 'logs'
   },
   
@@ -794,6 +795,7 @@ const WikiTreeManager = {
   },
 
   renderPagesList(pages) {
+    app.state.pages = pages || [];
     this.pagesListEl.innerHTML = '';
     
     if (!pages || pages.length === 0) {
@@ -1157,16 +1159,28 @@ const WikiTreeManager = {
   async loadWikiPage(filename) {
     if (!app.state.currentProjectId || !filename) return;
     
-    app.state.currentWikiFilename = filename;
+    let targetFilename = filename;
+    if (app.state.pages) {
+      const page = app.state.pages.find(p => 
+        p.filename === filename || 
+        p.title === filename ||
+        p.filename.replace('.md', '') === filename
+      );
+      if (page) {
+        targetFilename = page.filename;
+      }
+    }
+    
+    app.state.currentWikiFilename = targetFilename;
     
     // Highlight page list item
     const items = this.pagesListEl.querySelectorAll('.wiki-item');
     items.forEach(it => {
-      it.classList.toggle('active', it.dataset.filename === filename);
+      it.classList.toggle('active', it.dataset.filename === targetFilename);
     });
 
     try {
-      const res = await fetch(`/api/projects/${app.state.currentProjectId}/wiki/${filename}`);
+      const res = await fetch(`/api/projects/${app.state.currentProjectId}/wiki/${targetFilename}`);
       if (!res.ok) throw new Error('Failed to read wiki page');
       const page = await res.json();
       
@@ -2043,10 +2057,26 @@ const ChatManager = {
     // Build citations block
     let citationsHtml = '';
     if (!isUser && sources && sources.length > 0) {
+      const badges = sources.map(src => {
+        const cleanSrc = src.endsWith('.md') ? src : `${src}.md`;
+        let pageTitle = src.replace(/_/g, ' ').replace('.md', '');
+        if (app.state.pages) {
+          const page = app.state.pages.find(p => 
+            p.filename.toLowerCase() === cleanSrc.toLowerCase() ||
+            p.filename.replace('.md', '').toLowerCase() === src.toLowerCase() ||
+            p.title.toLowerCase() === src.toLowerCase()
+          );
+          if (page) {
+            pageTitle = page.title;
+          }
+        }
+        return `<span class="citation-badge" data-filename="${pageTitle}"><i data-lucide="link-2"></i>${pageTitle}</span>`;
+      }).join('');
+
       citationsHtml = `
         <div class="citation-badges-wrapper">
           <span class="citation-label">Tham chiếu:</span>
-          ${sources.map(src => `<span class="citation-badge" data-filename="${src}.md"><i data-lucide="link-2"></i>${src.replace(/_/g, ' ')}</span>`).join('')}
+          ${badges}
         </div>
       `;
     }
@@ -2086,7 +2116,14 @@ const ChatManager = {
     if (!isUser && sources && sources.length > 0) {
       msgDiv.querySelectorAll('.citation-badge').forEach(badge => {
         badge.addEventListener('click', () => {
-          const fn = badge.dataset.filename;
+          const title = badge.dataset.filename;
+          let fn = title;
+          if (app.state.pages) {
+            const page = app.state.pages.find(p => p.title === title);
+            if (page) {
+              fn = page.filename;
+            }
+          }
           app.events.emit('wiki:page-selected', fn);
         });
       });
