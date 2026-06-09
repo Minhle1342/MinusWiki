@@ -44,6 +44,14 @@ let appConfig = {
   GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || ''
 };
 
+const projectMutexes = new Map();
+function getProjectMutex(projectId) {
+  if (!projectMutexes.has(projectId)) {
+    projectMutexes.set(projectId, new Mutex());
+  }
+  return projectMutexes.get(projectId);
+}
+
 async function loadConfig() {
   try {
     await fs.mkdir(STORAGE_DIR, { recursive: true });
@@ -104,16 +112,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// Concurrency Control: Map of projectId -> Mutex
-// Used to prevent file corruption during concurrent LLM writes to index.md, overview.md, and other wiki pages.
-const projectMutexes = new Map();
 
-function getProjectMutex(projectId) {
-  if (!projectMutexes.has(projectId)) {
-    projectMutexes.set(projectId, new Mutex());
-  }
-  return projectMutexes.get(projectId);
-}
 
 // Ensure base directories exist
 async function ensureDirs() {
@@ -371,6 +370,89 @@ async function getGeminiEmbedding(text) {
 
   const data = await res.json();
   return data.embedding.values;
+}
+
+async function getEmbedding(text) {
+  const provider = (appConfig.LLM_PROVIDER || process.env.LLM_PROVIDER || 'gemini').trim();
+  if (provider === 'gemini') {
+    return await getGeminiEmbedding(text);
+  } else {
+    const openaiKey = (appConfig.OPENAI_API_KEY || process.env.OPENAI_API_KEY || '').trim();
+    if (!openaiKey) throw new Error('OPENAI_API_KEY is not configured');
+    
+    let url = appConfig.OPENAI_API_BASE || process.env.OPENAI_API_BASE || 'https://api.openai.com/v1';
+    url = url.replace(/\/chat\/completions$/, '');
+    if (!url.endsWith('/embeddings')) {
+      url = url.replace(/\/$/, '') + '/embeddings';
+    }
+    
+    const body = {
+      model: 'text-embedding-3-small',
+      input: text
+    };
+    
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${openaiKey}`
+      },
+      body: JSON.stringify(body)
+    });
+    
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`OpenAI Embedding API error (${res.status}): ${errText}`);
+    }
+    const data = await res.json();
+    return data.data[0].embedding;
+  }
+}
+
+function cosineSimilarity(vecA, vecB) {
+  if (!vecA || !vecB || vecA.length !== vecB.length) return 0;
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < vecA.length; i++) {
+    dotProduct += vecA[i] * vecB[i];
+    normA += vecA[i] * vecA[i];
+    normB += vecB[i] * vecB[i];
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+function getTermFrequencyVector(text) {
+  const words = text.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+  const freq = {};
+  words.forEach(w => {
+    if (w.length > 1) {
+      freq[w] = (freq[w] || 0) + 1;
+    }
+  });
+  return freq;
+}
+
+function getBagOfWordsSimilarity(textA, textB) {
+  const vecA = getTermFrequencyVector(textA);
+  const vecB = getTermFrequencyVector(textB);
+  
+  const allWords = new Set([...Object.keys(vecA), ...Object.keys(vecB)]);
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+  
+  allWords.forEach(w => {
+    const valA = vecA[w] || 0;
+    const valB = vecB[w] || 0;
+    dotProduct += valA * valB;
+    normA += valA * valA;
+    normB += valB * valB;
+  });
+  
+  if (normA === 0 || normB === 0) return 0;
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
 async function describePdfImages(pdfBuffer) {
@@ -1651,11 +1733,137 @@ async function runIngestPipeline(projectId, sourceName, text) {
   });
 }
 
+
+/**
+ * Chunks markdown content into logical paragraph-based segments.
+ */
+function chunkMarkdown(text, maxWords = 150, overlapWords = 30) {
+  const paragraphs = text.split(/\n\s*\n/);
+  const chunks = [];
+  let currentChunk = [];
+  let currentCount = 0;
+
+  for (const para of paragraphs) {
+    const trimmed = para.trim();
+    if (!trimmed) continue;
+    
+    const wordCount = trimmed.split(/\s+/).length;
+    if (currentCount + wordCount > maxWords) {
+      if (currentChunk.length > 0) {
+        chunks.push(currentChunk.join('\n\n'));
+      }
+      currentChunk = [trimmed];
+      currentCount = wordCount;
+    } else {
+      currentChunk.push(trimmed);
+      currentCount += wordCount;
+    }
+  }
+  if (currentChunk.length > 0) {
+    chunks.push(currentChunk.join('\n\n'));
+  }
+  return chunks;
+}
+
+/**
+ * Synchronizes wiki markdown files with LanceDB vector database.
+ * Employs a local JSON cache to prevent redundant embedding generation.
+ */
+async function syncProjectLanceDB(projectId) {
+  const wikiDir = path.join(PROJECTS_DIR, projectId, 'wiki');
+  const cachePath = path.join(PROJECTS_DIR, projectId, 'lancedb_cache.json');
+  const dbPath = path.join(PROJECTS_DIR, projectId, 'lancedb_vectors');
+
+  if (!existsSync(wikiDir)) return;
+
+  try {
+    const files = await fs.readdir(wikiDir);
+    const mdFiles = files.filter(f => f.endsWith('.md') && f !== 'log.md' && f !== 'index.md');
+
+    let cache = {};
+    if (existsSync(cachePath)) {
+      try {
+        cache = JSON.parse(await fs.readFile(cachePath, 'utf-8'));
+      } catch (e) {
+        console.error('Failed to read lancedb cache, resetting:', e);
+      }
+    }
+
+    let cacheChanged = false;
+    const activeSlugs = new Set(mdFiles.map(f => f.replace('.md', '')));
+
+    // Clean up deleted files from cache
+    for (const slug of Object.keys(cache)) {
+      if (!activeSlugs.has(slug)) {
+        delete cache[slug];
+        cacheChanged = true;
+      }
+    }
+
+    // Embed new/changed files
+    for (const file of mdFiles) {
+      const slug = file.replace('.md', '');
+      const filePath = path.join(wikiDir, file);
+      const stat = await fs.stat(filePath);
+      const mtime = stat.mtimeMs;
+
+      const cached = cache[slug];
+      if (cached && cached.mtime === mtime) {
+        continue;
+      }
+
+      console.log(`[LanceDB Sync] File changed or new: ${file}. Re-embedding...`);
+      const content = await fs.readFile(filePath, 'utf-8');
+      const chunks = chunkMarkdown(content);
+      const chunkData = [];
+
+      for (const chunk of chunks) {
+        if (!chunk.trim()) continue;
+        try {
+          const vector = await getEmbedding(chunk);
+          chunkData.push({ text: chunk, vector });
+        } catch (err) {
+          console.error(`Failed to get embedding for chunk in ${file}:`, err);
+        }
+      }
+
+      cache[slug] = {
+        mtime,
+        chunks: chunkData
+      };
+      cacheChanged = true;
+    }
+
+    if (cacheChanged) {
+      await fs.writeFile(cachePath, JSON.stringify(cache, null, 2), 'utf-8');
+    }
+
+    // Build or overwrite table
+    const allRows = [];
+    for (const slug of Object.keys(cache)) {
+      for (const item of cache[slug].chunks) {
+        allRows.push({
+          slug,
+          text: item.text,
+          vector: item.vector
+        });
+      }
+    }
+
+    if (allRows.length > 0) {
+      const db = await lancedb.connect(dbPath);
+      await db.createTable('wiki_chunks', allRows, { mode: 'overwrite' });
+    }
+  } catch (err) {
+    console.error('syncProjectLanceDB failed:', err);
+  }
+}
+
 /**
  * Query Retrieval Pipeline (4 phases)
  * Searches the wiki pages, synthesizes a reply, and suggests follow-up actions.
  */
-async function runQueryPipeline(projectId, query, contextFiles) {
+async function runQueryPipeline(projectId, query, contextFiles, history = [], activePage = null) {
   console.log(`Starting Query Pipeline for project ${projectId}, query: "${query}", contextFiles:`, contextFiles);
   const wikiDir = path.join(PROJECTS_DIR, projectId, 'wiki');
 
@@ -1663,157 +1871,439 @@ async function runQueryPipeline(projectId, query, contextFiles) {
     throw new Error('Wiki directory not found');
   }
 
-  // Phase 1: Search / Index Lookup
+  // Step 1: Phân tích Ý định & Tái cấu trúc câu hỏi (Query Rewriting & Intent Analysis)
+  let processedQuery = query;
+  let expandedKeywords = [];
+  
+  const rewriteSystem = `
+  Bạn là chuyên gia phân tích truy vấn tiếng Việt cho hệ thống Wiki.
+  Nhiệm vụ của bạn là phân tích câu hỏi người dùng và lịch sử trò chuyện (nếu có) để thực hiện 2 việc:
+  1. Context Serialization: Viết lại câu hỏi thành một câu đơn độc lập (Standalone Query) chứa đầy đủ ngữ cảnh của các tin nhắn trước để công cụ tìm kiếm không bị lạc hướng. Nếu không có lịch sử hoặc câu hỏi đã tự đầy đủ, giữ nguyên câu hỏi gốc.
+  2. Query Expansion: Trích xuất các từ khóa cốt lõi và các thực thể (Entities) liên quan bằng tiếng Việt (không dấu và có dấu) để hỗ trợ tìm kiếm từ khóa.
+
+  Trả về định dạng JSON duy nhất:
+  {
+    "standaloneQuery": "Câu hỏi đã được viết lại hoàn chỉnh đầy đủ ngữ cảnh...",
+    "expandedKeywords": ["từ_khóa_1", "từ_khóa_2", "thực_thể_liên_quan"]
+  }
+  `;
+
+  const rewriteUser = `
+  Lịch sử chat gần đây:
+  ${JSON.stringify(history.slice(-4), null, 2)}
+
+  Câu hỏi mới của người dùng: "${query}"
+  `;
+
+  try {
+    const rewriteResponse = await callLLM(rewriteSystem, rewriteUser, true);
+    const parsedRewrite = parseLLMJSON(rewriteResponse);
+    if (parsedRewrite) {
+      if (parsedRewrite.standaloneQuery) {
+        processedQuery = parsedRewrite.standaloneQuery;
+      }
+      if (Array.isArray(parsedRewrite.expandedKeywords)) {
+        expandedKeywords = parsedRewrite.expandedKeywords;
+      }
+    }
+  } catch (err) {
+    console.error('Failed to run query rewriting/expansion:', err);
+  }
+
+  // Fallback if keywords are empty
+  if (expandedKeywords.length === 0) {
+    expandedKeywords = processedQuery.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  }
+
+  console.log(`[Query Pipeline] Standalone Query: "${processedQuery}"`);
+  console.log(`[Query Pipeline] Expanded Keywords:`, expandedKeywords);
+
+  // Read all wiki pages
   const files = await fs.readdir(wikiDir);
   const mdFiles = files.filter(f => f.endsWith('.md') && f !== 'log.md' && f !== 'index.md');
+
+  // Step 2: Truy xuất đa nguồn lai (Hybrid Retrieval & 4-Signal Relevance Model)
   
-  let relevantPages = [];
-
-  if (contextFiles && Array.isArray(contextFiles) && contextFiles.length > 0) {
-    const contextSet = new Set();
-    const normalizedContext = contextFiles.map(f => f.endsWith('.md') ? f : `${f}.md`);
-
-    // Add selected context files themselves
-    normalizedContext.forEach(f => {
-      if (mdFiles.includes(f)) {
-        contextSet.add(f);
-      }
-    });
-
-    // Extract links bidirectionally
-    for (const file of mdFiles) {
-      const filePath = path.join(wikiDir, file);
-      if (existsSync(filePath)) {
-        try {
-          const content = await fs.readFile(filePath, 'utf-8');
-          const isContextFile = normalizedContext.includes(file);
-          const linkRegex = /\[.*?\]\((?:\.\/)?([^)]+?\.md)\)/g;
-          let match;
-          while ((match = linkRegex.exec(content)) !== null) {
-            const targetFilename = match[1];
-
-            // Outgoing link from a context file
-            if (isContextFile && mdFiles.includes(targetFilename)) {
-              contextSet.add(targetFilename);
-            }
-
-            // Incoming link from another file to one of our context files
-            if (!isContextFile && normalizedContext.includes(targetFilename) && mdFiles.includes(file)) {
-              contextSet.add(file);
-            }
+  // 1. Dense Retrieval (Vector Similarity via LanceDB)
+  const denseScores = {};
+  try {
+    await syncProjectLanceDB(projectId);
+    const dbPath = path.join(PROJECTS_DIR, projectId, 'lancedb_vectors');
+    const db = await lancedb.connect(dbPath);
+    const tableNames = await db.tableNames();
+    const tableName = 'wiki_chunks';
+    
+    if (tableNames.includes(tableName)) {
+      const table = await db.openTable(tableName);
+      const queryVector = await getEmbedding(processedQuery);
+      
+      try {
+        const results = await table.search(queryVector).limit(100).toArray();
+        for (const row of results) {
+          const sim = cosineSimilarity(queryVector, row.vector);
+          if (!denseScores[row.slug] || sim > denseScores[row.slug]) {
+            denseScores[row.slug] = sim;
           }
-        } catch (err) {
-          console.error(`Error reading ${file} for link extraction:`, err);
+        }
+      } catch (err) {
+        console.error('LanceDB search failed, trying toArray fallback:', err);
+        const allRows = await table.toArray();
+        for (const row of allRows) {
+          const sim = cosineSimilarity(queryVector, row.vector);
+          if (!denseScores[row.slug] || sim > denseScores[row.slug]) {
+            denseScores[row.slug] = sim;
+          }
         }
       }
     }
-    relevantPages = Array.from(contextSet);
-  } else {
-    const pagesSummary = [];
+  } catch (err) {
+    console.error('LanceDB operation failed, skipping dense retrieval:', err);
+  }
 
-    for (const file of mdFiles) {
-      const filePath = path.join(wikiDir, file);
-      const content = await fs.readFile(filePath, 'utf-8');
-      const slug = file.replace('.md', '');
-      const firstLines = content.split('\n').slice(0, 5).join(' ');
-      pagesSummary.push({
-        slug,
-        summary: firstLines.substring(0, 200)
-      });
-    }
+  // 2. Sparse Retrieval (BM25)
+  const sparseScores = {};
+  const keywordDF = {};
+  const fileTokens = {};
+  const docLengths = {};
+  let avgDocLength = 0;
 
-    // Use LLM to select the most relevant pages
-    const searchSystem = `
-    Bạn là trợ lý tìm kiếm Wiki thông minh bằng tiếng Việt.
-    Dựa trên câu hỏi của người dùng, hãy chọn ra tối đa 5 tệp Wiki (.md) liên quan nhất từ danh sách các trang đang có sẵn.
-    Trả về kết quả dưới dạng JSON duy nhất có cấu trúc:
-    {
-      "relevant_pages": ["slug1.md", "slug2.md"]
-    }
-    Nếu không có trang nào liên quan, trả về mảng rỗng. Không kèm giải thích.
-    `;
-
-    const searchUser = `
-    Câu hỏi người dùng: "${query}"
-
-    Danh sách các trang Wiki hiện có:
-    ${JSON.stringify(pagesSummary, null, 2)}
-    `;
-
+  for (const file of mdFiles) {
+    const slug = file.replace('.md', '');
+    const filePath = path.join(wikiDir, file);
+    let content = '';
     try {
-      const searchResponse = await callLLM(searchSystem, searchUser, true);
-      const parsedSearch = parseLLMJSON(searchResponse);
-      if (parsedSearch && Array.isArray(parsedSearch.relevant_pages)) {
-        relevantPages = parsedSearch.relevant_pages.map(p => p.endsWith('.md') ? p : `${p}.md`);
+      content = await fs.readFile(filePath, 'utf-8');
+    } catch (e) {}
+    
+    const tokens = content.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+    fileTokens[slug] = tokens;
+    docLengths[slug] = tokens.length;
+    avgDocLength += tokens.length;
+    
+    const uniqueTokens = new Set(tokens);
+    for (const kw of expandedKeywords) {
+      const kwLower = kw.toLowerCase();
+      if (uniqueTokens.has(kwLower)) {
+        keywordDF[kwLower] = (keywordDF[kwLower] || 0) + 1;
       }
-    } catch (err) {
-      console.error('Failed to run LLM search selection:', err);
-      // Simple fallback keyword search
-      relevantPages = mdFiles.filter(file => {
-        const normalizedQuery = query.toLowerCase();
-        const normalizedName = file.replace('.md', '').replace(/_/g, ' ').toLowerCase();
-        return normalizedQuery.includes(normalizedName) || normalizedName.includes(normalizedQuery);
-      }).slice(0, 5);
     }
   }
 
-  // Always include index.md and overview.md for general context if no pages found
-  if (relevantPages.length === 0) {
-    relevantPages = ['overview.md'];
+  avgDocLength = mdFiles.length > 0 ? avgDocLength / mdFiles.length : 1;
+  const k1 = 1.2;
+  const b = 0.75;
+  const N = mdFiles.length;
+
+  for (const file of mdFiles) {
+    const slug = file.replace('.md', '');
+    const tokens = fileTokens[slug] || [];
+    const docLen = docLengths[slug] || 0;
+    
+    let score = 0;
+    for (const kw of expandedKeywords) {
+      const kwLower = kw.toLowerCase();
+      const tf = tokens.filter(t => t === kwLower).length;
+      if (tf === 0) continue;
+      
+      const df = keywordDF[kwLower] || 0;
+      const idf = Math.log((N - df + 0.5) / (df + 0.5) + 1);
+      
+      const numerator = tf * (k1 + 1);
+      const denominator = tf + k1 * (1 - b + b * (docLen / avgDocLength));
+      score += idf * (numerator / denominator);
+    }
+    sparseScores[slug] = score;
   }
 
-  // Phase 2: Read relevant pages
-  let contextText = '';
-  const loadedSources = [];
+  // 3. Graph Topology (In-degree calculation across all wiki pages)
+  const inDegrees = {};
+  const graphEdges = {};
+
+  for (const file of mdFiles) {
+    const slug = file.replace('.md', '');
+    inDegrees[slug] = 0;
+    graphEdges[slug] = [];
+  }
+
+  for (const file of mdFiles) {
+    const sourceSlug = file.replace('.md', '');
+    const filePath = path.join(wikiDir, file);
+    try {
+      const content = await fs.readFile(filePath, 'utf-8');
+      const linkRegex = /\[.*?\]\((?:\.\/)?([^)]+?\.md)\)/g;
+      let match;
+      while ((match = linkRegex.exec(content)) !== null) {
+        const targetFilename = match[1];
+        const targetSlug = targetFilename.replace('.md', '');
+        if (inDegrees[targetSlug] !== undefined) {
+          graphEdges[sourceSlug].push(targetSlug);
+        }
+      }
+    } catch (err) {}
+  }
+
+  for (const sourceSlug of Object.keys(graphEdges)) {
+    const uniqueTargets = new Set(graphEdges[sourceSlug]);
+    for (const targetSlug of uniqueTargets) {
+      inDegrees[targetSlug]++;
+    }
+  }
+
+  // 4. Link Distance from activePage (computed across the whole graph)
+  const linkDistances = {};
+  for (const file of mdFiles) {
+    const slug = file.replace('.md', '');
+    linkDistances[slug] = Infinity;
+  }
+
+  const activePageSlug = activePage ? activePage.replace('.md', '') : null;
+
+  if (activePageSlug && linkDistances[activePageSlug] !== undefined) {
+    const queue = [activePageSlug];
+    linkDistances[activePageSlug] = 0;
+    
+    const adjList = {};
+    for (const file of mdFiles) {
+      const slug = file.replace('.md', '');
+      adjList[slug] = new Set();
+    }
+    
+    for (const sourceSlug of Object.keys(graphEdges)) {
+      for (const targetSlug of graphEdges[sourceSlug]) {
+        adjList[sourceSlug].add(targetSlug);
+        adjList[targetSlug].add(sourceSlug);
+      }
+    }
+    
+    while (queue.length > 0) {
+      const current = queue.shift();
+      const currentDist = linkDistances[current];
+      
+      for (const neighbor of adjList[current]) {
+        if (linkDistances[neighbor] === Infinity) {
+          linkDistances[neighbor] = currentDist + 1;
+          queue.push(neighbor);
+        }
+      }
+    }
+  }
+
+  // Combine & Rank 4-Signal Relevance Model for mdFiles
+  const rankedPages = mdFiles.map(file => {
+    const slug = file.replace('.md', '');
+    
+    const dense = Math.max(0, denseScores[slug] || 0);
+    const sparse = sparseScores[slug] || 0;
+    const inDegree = inDegrees[slug] || 0;
+    
+    const dist = linkDistances[slug];
+    let distanceScore = 0;
+    if (dist === 0) distanceScore = 1.0;
+    else if (dist === 1) distanceScore = 0.8;
+    else if (dist === 2) distanceScore = 0.5;
+    
+    return {
+      file,
+      slug,
+      dense,
+      sparse,
+      inDegree,
+      distanceScore
+    };
+  });
+
+  const maxSparse = Math.max(...rankedPages.map(p => p.sparse), 1);
+  const maxInDegree = Math.max(...rankedPages.map(p => p.inDegree), 1);
+
+  rankedPages.forEach(p => {
+    p.normalizedSparse = p.sparse / maxSparse;
+    p.normalizedInDegree = p.inDegree / maxInDegree;
+    
+    // Weights: Dense: 0.4, Sparse: 0.3, Graph: 0.15, Distance: 0.15
+    p.finalScore = (p.dense * 0.4) + 
+                    (p.normalizedSparse * 0.3) + 
+                    (p.normalizedInDegree * 0.15) + 
+                    (p.distanceScore * 0.15);
+  });
+
+  rankedPages.sort((a, b) => b.finalScore - a.finalScore);
+
+  console.log(`[Query Pipeline] Ranked pages for standalone query: "${processedQuery}":`);
+  rankedPages.slice(0, 5).forEach((p, idx) => {
+    console.log(`  ${idx+1}. ${p.file} | Final: ${p.finalScore.toFixed(3)} (Vector: ${p.dense.toFixed(3)}, Keyword: ${p.normalizedSparse.toFixed(3)}, InDegree: ${p.normalizedInDegree.toFixed(3)}, Distance: ${p.distanceScore.toFixed(3)})`);
+  });
+
+  // Decide candidate relevant pages
+  let relevantPages = [];
+  if (contextFiles && Array.isArray(contextFiles) && contextFiles.length > 0) {
+    const selectedSlugs = contextFiles.map(f => f.replace('.md', ''));
+    // Always include selected files first
+    const selectedFiles = mdFiles.filter(f => selectedSlugs.includes(f.replace('.md', '')));
+    
+    // The rest of the slots are filled by the top-ranked non-selected files
+    const remainingCount = Math.max(0, 5 - selectedFiles.length);
+    const nonSelectedRanked = rankedPages.filter(p => !selectedSlugs.includes(p.slug));
+    
+    relevantPages = [
+      ...selectedFiles,
+      ...nonSelectedRanked.slice(0, remainingCount).map(p => p.file)
+    ];
+  } else {
+    // Just take the top 5 ranked pages
+    relevantPages = rankedPages.slice(0, 5).map(p => p.file);
+  }
+
+  // Always include overview.md if no pages found
+  if (relevantPages.length === 0) {
+    if (mdFiles.includes('overview.md')) {
+      relevantPages = ['overview.md'];
+    } else if (mdFiles.length > 0) {
+      relevantPages = [mdFiles[0]];
+    }
+  }
+
+  // Step 3: Phân loại Thông tin Tìm kiếm được & Lọc tin nhiễu (Passage Grading & Information Sieve)
+  const passagesForGrading = {};
   for (const page of relevantPages) {
     const pagePath = path.join(wikiDir, page);
     if (existsSync(pagePath)) {
-      const content = await fs.readFile(pagePath, 'utf-8');
-      contextText += `=== FILE: ${page} ===\n${content}\n\n`;
-      loadedSources.push(page);
+      try {
+        const content = await fs.readFile(pagePath, 'utf-8');
+        passagesForGrading[page] = content.substring(0, 1500); // sample the first 1500 chars
+      } catch (err) {}
     }
   }
 
-  // Phase 3 & 4: Generate Answer & Suggestions
-  const answerSystem = `
-  Bạn là chuyên gia tư vấn thông tin dựa trên Wiki cá nhân bằng tiếng Việt.
-  Hãy trả lời câu hỏi của người dùng bằng cách sử dụng thông tin từ ngữ cảnh Wiki được cung cấp.
-  Đầu ra phải là một đối tượng JSON có cấu trúc sau:
+  const gradingSystem = `
+  Bạn là kiểm duyệt viên tài liệu tiếng Việt thông minh cho chatbot.
+  Dựa trên câu hỏi của người dùng và các tài liệu tìm thấy, hãy đánh giá mức độ hữu ích của từng tài liệu đối với câu hỏi.
+  Phân loại từng tài liệu thành một trong ba nhãn:
+  - "Useful": Cực kỳ hữu ích, chứa câu trả lời trực tiếp hoặc gián tiếp.
+  - "Neutral": Trung tính, chứa thông tin nền bổ trợ hữu ích.
+  - "Irrelevant": Hoàn toàn không liên quan đến câu hỏi.
+
+  Trả về định dạng JSON duy nhất:
   {
-    "answer": "Nội dung trả lời chi tiết bằng Markdown tiếng Việt. Luôn đính kèm liên kết nội bộ dạng [Tên hiển thị](slug.md) khi đề cập đến các khái niệm trong Wiki. Chỉ liên kết tới các trang thực sự tồn tại trong Wiki.",
+    "grades": {
+      "slug1.md": "Useful",
+      "slug2.md": "Neutral",
+      "slug3.md": "Irrelevant"
+    }
+  }
+  Chỉ trả về JSON, không kèm giải thích ngoài khối JSON.
+  `;
+
+  const gradingUser = `
+  Câu hỏi người dùng: "${processedQuery}"
+
+  Các tài liệu tìm được:
+  ${JSON.stringify(passagesForGrading, null, 2)}
+  `;
+
+  let gradedPages = [...relevantPages];
+  let gradesMap = {};
+  try {
+    const gradingResponse = await callLLM(gradingSystem, gradingUser, true);
+    const parsedGrading = parseLLMJSON(gradingResponse);
+    if (parsedGrading && parsedGrading.grades) {
+      gradesMap = parsedGrading.grades;
+      gradedPages = relevantPages.filter(page => {
+        const key = page;
+        const keyNoExt = page.replace('.md', '');
+        const grade = gradesMap[key] || gradesMap[keyNoExt] || 'Useful';
+        return grade === 'Useful' || grade === 'Neutral';
+      });
+    }
+  } catch (err) {
+    console.error('Failed to run passage grading, using all relevant pages:', err);
+  }
+
+  // Fallback: keep at least one page if all are irrelevant
+  if (gradedPages.length === 0 && relevantPages.length > 0) {
+    gradedPages = [relevantPages[0]];
+  }
+
+  console.log(`[Query Pipeline] Graded pages:`, gradesMap);
+  console.log(`[Query Pipeline] Final selected context pages:`, gradedPages);
+
+  // Read context content from graded pages
+  let contextText = '';
+  const loadedSources = [];
+  for (const page of gradedPages) {
+    const pagePath = path.join(wikiDir, page);
+    if (existsSync(pagePath)) {
+      try {
+        const content = await fs.readFile(pagePath, 'utf-8');
+        contextText += `=== FILE: ${page} ===\n${content}\n\n`;
+        loadedSources.push(page);
+      } catch (err) {}
+    }
+  }
+
+  // Step 4: Nhà máy Tổng hợp Câu trả lời & Trích xuất Trực quan (Answer Synthesis Engine)
+  const synthesisSystem = `
+  Bạn là chuyên gia tổng hợp thông tin cá nhân thông minh bằng tiếng Việt.
+  Hãy trả lời câu hỏi của người dùng dựa trên các tài liệu Wiki đã lọc sạch được cung cấp dưới đây.
+
+  YÊU CẦU TRÌNH BÀY:
+  1. Trực quan hóa cấu trúc:
+     - Sử dụng Bullet points cho các danh sách.
+     - Sử dụng Code blocks cho mã nguồn hoặc câu lệnh terminal.
+     - Sử dụng Callouts (bằng cách dùng định dạng Blockquote \`> Lưu ý:\` hoặc \`> Quan trọng:\`) cho các thông tin lưu ý đặc biệt.
+  2. Đính kèm liên kết nội bộ:
+     - Luôn đính kèm liên kết nội bộ dạng [Tên hiển thị](slug.md) khi đề cập đến các khái niệm hoặc trang khác trong Wiki. Chỉ liên kết tới các trang thực sự tồn tại trong Wiki.
+  3. Trích xuất thuộc tính (Metadata):
+     - Trích xuất các thực thể (Entities), khái niệm (Concepts), và hành động cần làm (Actions) xuất hiện trong câu trả lời.
+  4. Gợi ý hành động tiếp theo:
+     - Tạo đúng 3 gợi ý câu hỏi tiếp theo (suggestions) có thể thực thi được hoặc câu hỏi sâu hơn dựa trên nội dung.
+
+  Đầu ra phải là một đối tượng JSON duy nhất có cấu trúc:
+  {
+    "answer": "Nội dung trả lời chi tiết bằng Markdown tiếng Việt...",
+    "metadata": {
+      "entities": ["thực thể 1", "thực thể 2"],
+      "concepts": ["khái niệm 1", "khái niệm 2"],
+      "actions": ["hành động 1", "hành động 2"]
+    },
     "suggestions": [
       "Câu hỏi gợi ý tiếp theo 1",
       "Câu hỏi gợi ý tiếp theo 2",
       "Câu hỏi gợi ý tiếp theo 3"
     ]
   }
-  Chỉ trả về JSON, không kèm lời giải thích nào ngoài khối JSON.
+  Chỉ trả về JSON, không kèm giải thích ngoài khối JSON.
   `;
 
-  const answerUser = `
-  Ngữ cảnh Wiki:
+  const synthesisUser = `
+  Ngữ cảnh Wiki đã lọc:
   ${contextText}
 
-  Câu hỏi người dùng: "${query}"
+  Lịch sử chat gần đây:
+  ${JSON.stringify(history.slice(-4), null, 2)}
+
+  Câu hỏi người dùng (đã chuẩn hóa): "${processedQuery}"
   `;
 
   try {
-    const answerResponse = await callLLM(answerSystem, answerUser, true);
+    const answerResponse = await callLLM(synthesisSystem, synthesisUser, true);
     const parsedAnswer = parseLLMJSON(answerResponse);
     return {
       answer: parsedAnswer.answer,
       sources: loadedSources.map(s => s.replace('.md', '')),
-      suggestions: parsedAnswer.suggestions || []
+      suggestions: parsedAnswer.suggestions || [],
+      metadata: parsedAnswer.metadata || { entities: [], concepts: [], actions: [] }
     };
   } catch (err) {
-    console.error('Failed to generate answer via LLM:', err);
+    console.error('Failed to generate synthesized answer via LLM:', err);
     return {
-      answer: `Đã xảy ra lỗi khi kết nối với LLM để trả lời câu hỏi của bạn: **${err.message}**\n\nVui lòng kiểm tra lại cấu hình khóa API trong tệp \`.env\` hoặc số dư tài khoản của bạn. Dưới đây là các tài liệu liên quan được tìm thấy:\n\n${relevantPages.map(p => `- [${p.replace('.md', '')}](${p})`).join('\n')}`,
+      answer: `Đã xảy ra lỗi khi kết nối với LLM để tổng hợp câu trả lời: **${err.message}**\n\nVui lòng kiểm tra lại cấu hình API key hoặc kết nối mạng. Dưới đây là các tài liệu liên quan được tìm thấy:\n\n${gradedPages.map(p => `- [${p.replace('.md', '')}](${p})`).join('\n')}`,
       sources: loadedSources.map(s => s.replace('.md', '')),
-      suggestions: ['Hãy thử lại câu hỏi của bạn', 'Xem danh mục các trang']
+      suggestions: ['Hãy thử lại câu hỏi của bạn', 'Xem danh mục các trang'],
+      metadata: { entities: [], concepts: [], actions: [] }
     };
   }
 }
+
 
 /**
  * Cascade Deletion & Lint Operation
@@ -2639,14 +3129,14 @@ app.delete('/api/projects/:id/wiki/:filename', async (req, res) => {
  */
 app.post('/api/projects/:id/query', async (req, res) => {
   const { id } = req.params;
-  const { query, contextFiles } = req.body;
+  const { query, contextFiles, history, activePage } = req.body;
 
   if (!query) {
     return res.status(400).json({ error: 'Query parameter is required' });
   }
 
   try {
-    const result = await runQueryPipeline(id, query, contextFiles);
+    const result = await runQueryPipeline(id, query, contextFiles, history, activePage);
     res.json(result);
   } catch (error) {
     console.error('Error processing query:', error);

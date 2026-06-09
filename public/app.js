@@ -1883,6 +1883,7 @@ const ChatManager = {
     this.chatInputWrapper = document.getElementById('chat-input-wrapper');
     this.contextTagsContainer = document.getElementById('chat-context-tags');
     this.selectedContextFiles = [];
+    this.history = [];
     
     // Form trigger
     this.chatForm.addEventListener('submit', (e) => {
@@ -1986,6 +1987,7 @@ const ChatManager = {
 
   clearChatHistory() {
     this.selectedContextFiles = [];
+    this.history = [];
     this.renderContextTags();
     this.chatThread.innerHTML = `
       <div class="chat-message assistant">
@@ -2187,7 +2189,9 @@ const ChatManager = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           query: queryText,
-          contextFiles: this.selectedContextFiles.map(f => f.filename)
+          contextFiles: this.selectedContextFiles.map(f => f.filename),
+          history: this.history,
+          activePage: app.state.currentWikiFilename || null
         })
       });
 
@@ -2196,6 +2200,13 @@ const ChatManager = {
       if (!res.ok) throw new Error('Query pipeline failed');
       const data = await res.json();
       
+      // Update history
+      this.history.push({ role: 'user', content: queryText });
+      this.history.push({ role: 'assistant', content: data.answer });
+      if (this.history.length > 10) {
+        this.history = this.history.slice(this.history.length - 10);
+      }
+
       // Append assistant answer
       this.appendMessage(data.answer, false, data.sources, data.suggestions);
     } catch (err) {
