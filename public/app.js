@@ -734,11 +734,13 @@ const WikiTreeManager = {
     
     this.mpeMode = localStorage.getItem('minuswiki_mpe_mode') === 'true';
     this.updateMpeUI();
-    this.toggleMpeBtn.addEventListener('click', () => {
-      this.mpeMode = !this.mpeMode;
-      localStorage.setItem('minuswiki_mpe_mode', this.mpeMode);
-      this.updateMpeUI();
-    });
+    if (this.toggleMpeBtn) {
+      this.toggleMpeBtn.addEventListener('click', () => {
+        this.mpeMode = !this.mpeMode;
+        localStorage.setItem('minuswiki_mpe_mode', this.mpeMode);
+        this.updateMpeUI();
+      });
+    }
 
     this.autoMaintenanceMode = localStorage.getItem('minuswiki_auto_maintenance') === 'true';
     if (this.autoMaintenanceChk) {
