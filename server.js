@@ -723,12 +723,14 @@ ${newPagesInfo.map(p => `- File: "${p.slug}.md", Tiêu đề: "${p.title}", Đ�
     console.error('Failed to update index.md in linkIngestedPages:', err);
   }
 
-  // 6. AI contextual linking pass for all new files (linking keywords inside new pages to each other)
+  // 6. AI contextual linking pass for all new files (linking keywords inside new files to global wiki files)
   try {
-    const allSlugs = newSlugs.filter(s => s !== 'index' && s !== 'overview');
-    const allFiles = allSlugs.map(s => `${s}.md`);
+    const allFilesOnDisk = await fs.readdir(wikiDir);
+    const mdFilesOnDisk = allFilesOnDisk.filter(f => f.endsWith('.md') && f !== 'log.md' && f !== 'index.md' && f !== 'overview.md');
+    
+    // Build global page database for cross-linking (new pages + existing wiki pages)
     const pageData = [];
-    for (const file of allFiles) {
+    for (const file of mdFilesOnDisk) {
       const filePath = path.join(wikiDir, file);
       if (existsSync(filePath)) {
         const raw = await fs.readFile(filePath, 'utf-8');
@@ -736,23 +738,27 @@ ${newPagesInfo.map(p => `- File: "${p.slug}.md", Tiêu đề: "${p.title}", Đ�
         const title = file.replace('.md', '').replace(/_/g, ' ');
         pageData.push({
           filename: file,
+          slug: file.replace('.md', ''),
           title,
           content: content.trim()
         });
       }
     }
 
-    for (const currentPage of pageData) {
+    const newlyAddedSlugs = newSlugs.filter(s => s !== 'index' && s !== 'overview');
+    const targetCurrentPages = pageData.filter(p => newlyAddedSlugs.includes(p.slug));
+
+    for (const currentPage of targetCurrentPages) {
       const otherPages = pageData.filter(p => p.filename !== currentPage.filename);
       if (otherPages.length === 0) continue;
 
       const systemPrompt = `
 Bạn là chuyên gia biên soạn Wiki thông minh bằng tiếng Việt.
 Dưới đây là một trang tài liệu hiện tại trong Wiki: "${currentPage.filename}" (Tiêu đề: ${currentPage.title}).
-Và danh sách các trang khác trong cùng nhóm tài liệu:
+Và danh sách các trang khác trong toàn bộ hệ thống Wiki:
 ${otherPages.map(p => `- File: "${p.filename}", Tiêu đề: "${p.title}", Tóm tắt nội dung: ${p.content.substring(0, 300)}...`).join('\n')}
 
-Nhiệm vụ của bạn là phân tích nội dung trang hiện tại và đề xuất các vị trí có thể chèn liên kết dạng [Từ khóa](./tên_file.md) hoặc [[tên_file]] tới các trang khác trong nhóm tài liệu trên nếu từ khóa hoặc ý nghĩa của chúng xuất hiện trong văn bản.
+Nhiệm vụ của bạn là phân tích nội dung trang hiện tại và đề xuất các vị trí có thể chèn liên kết dạng [Từ khóa](./tên_file.md) tới các trang khác trong danh sách trên nếu từ khóa hoặc ý nghĩa của chúng xuất hiện trong văn bản.
 Hãy tìm từ khóa chính xác xuất hiện trong nội dung của trang hiện tại. Không được tự bịa ra từ khóa không tồn tại trong văn bản gốc.
 
 Trả về kết quả dưới dạng mảng JSON gồm các đề xuất thay thế. Ví dụ:
@@ -784,7 +790,6 @@ ${currentPage.content}
           for (const sug of suggestions) {
             if (!sug.exactKeyword || !sug.replacement) continue;
             if (updatedContent.includes(sug.exactKeyword)) {
-              // Avoid double link
               const keywordEscaped = sug.exactKeyword.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
               const linkRegex = new RegExp(`\\[[^\\]]*${keywordEscaped}[^\\]]*\\]\\([^\\)]+\\)`, 'i');
               const wikiLinkRegex = new RegExp(`\\[\\[[^\\]]*${keywordEscaped}[^\\]]*\\]\\]`, 'i');
@@ -792,20 +797,28 @@ ${currentPage.content}
                 continue;
               }
 
-              updatedContent = updatedContent.replace(sug.exactKeyword, sug.replacement);
-              changed = true;
+              // Use global regex replacement safely for all unlinked occurrences
+              const safeRegex = new RegExp(`(?<!\\[[^\\]]*)\\b${keywordEscaped}\\b(?![^\\]]*\\])`, 'gu');
+              const newUpdated = updatedContent.replace(safeRegex, sug.replacement);
+              if (newUpdated !== updatedContent) {
+                updatedContent = newUpdated;
+                changed = true;
+              } else {
+                updatedContent = updatedContent.replace(sug.exactKeyword, sug.replacement);
+                changed = true;
+              }
             }
           }
 
           if (changed) {
             await fs.writeFile(filePath, stringifyFrontmatter(frontmatter, updatedContent), 'utf-8');
-            console.log(`[Link Ingested Pages] Contextually linked keywords in ${currentPage.filename}`);
+            console.log(`[Link Ingested Pages] Contextually linked global keywords in ${currentPage.filename}`);
             
             try {
               const cleanTitle = currentPage.filename.replace('.md', '').replace(/_/g, ' ');
               await fs.appendFile(
                 logFilePath,
-                `\n- [${timestamp}] AI đã tự động chèn liên kết ngữ cảnh chéo vào [${cleanTitle}](${currentPage.filename}) sau khi nạp tài liệu thành công.\n`
+                `\n- [${timestamp}] AI đã tự động chèn liên kết ngữ cảnh chéo toàn cục vào [${cleanTitle}](${currentPage.filename}) sau khi nạp tài liệu thành công.\n`
               );
             } catch (err) {
               console.error('Failed to append to log.md in linkIngestedPages:', err);
@@ -2038,6 +2051,176 @@ async function trackProvenance(answer, loadedSources, wikiDir) {
   return Array.from(verifiedSources);
 }
 
+// ==========================================
+// GRAPH DATABASE & GRAPHRAG ENGINE EXTENSIONS
+// ==========================================
+
+/**
+ * Computes PageRank scores across graph nodes and edges.
+ */
+function computePageRank(nodes, edges, damping = 0.85, maxIter = 25) {
+  const N = nodes.length;
+  if (N === 0) return {};
+  
+  let scores = {};
+  nodes.forEach(n => scores[n] = 1 / N);
+  
+  const outDegree = {};
+  const inEdges = {};
+  nodes.forEach(n => {
+    outDegree[n] = 0;
+    inEdges[n] = [];
+  });
+  
+  edges.forEach(({ source, target }) => {
+    if (outDegree[source] !== undefined) outDegree[source]++;
+    if (inEdges[target] !== undefined) inEdges[target].push(source);
+  });
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    const newScores = {};
+    let sinkScore = 0;
+    
+    nodes.forEach(n => {
+      if (outDegree[n] === 0) sinkScore += scores[n];
+    });
+
+    nodes.forEach(n => {
+      let sum = 0;
+      (inEdges[n] || []).forEach(src => {
+        if (outDegree[src] > 0) {
+          sum += scores[src] / outDegree[src];
+        }
+      });
+      newScores[n] = (1 - damping) / N + damping * (sum + sinkScore / N);
+    });
+    scores = newScores;
+  }
+  return scores;
+}
+
+/**
+ * Detects graph communities using Label Propagation Algorithm (LPA).
+ */
+function detectGraphCommunities(nodes, edges, maxIter = 15) {
+  const communities = {};
+  nodes.forEach((n, idx) => {
+    communities[n] = idx + 1;
+  });
+
+  const adj = {};
+  nodes.forEach(n => adj[n] = []);
+  edges.forEach(({ source, target }) => {
+    if (adj[source]) adj[source].push(target);
+    if (adj[target]) adj[target].push(source);
+  });
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    let changed = false;
+    const shuffledNodes = [...nodes].sort(() => Math.random() - 0.5);
+
+    for (const node of shuffledNodes) {
+      const neighbors = adj[node] || [];
+      if (neighbors.length === 0) continue;
+
+      const labelCounts = {};
+      neighbors.forEach(neigh => {
+        const l = communities[neigh];
+        labelCounts[l] = (labelCounts[l] || 0) + 1;
+      });
+
+      let maxCount = -1;
+      let bestLabel = communities[node];
+      for (const [l, count] of Object.entries(labelCounts)) {
+        if (count > maxCount) {
+          maxCount = count;
+          bestLabel = Number(l);
+        }
+      }
+
+      if (communities[node] !== bestLabel) {
+        communities[node] = bestLabel;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return communities;
+}
+
+/**
+ * Reciprocal Rank Fusion (RRF) for combining multiple ranked lists
+ */
+function computeRRF(rankingsMap, k = 60) {
+  const rrfScores = {};
+  for (const listName of Object.keys(rankingsMap)) {
+    const list = rankingsMap[listName];
+    list.forEach((slug, rank) => {
+      if (!rrfScores[slug]) rrfScores[slug] = 0;
+      rrfScores[slug] += 1 / (k + rank + 1);
+    });
+  }
+  return rrfScores;
+}
+
+/**
+ * Multi-hop Graph Traversal helper to collect neighbor context (1-hop & 2-hop)
+ */
+function getMultiHopNeighbors(startSlugs, graphEdges, maxHops = 2) {
+  const visited = new Set(startSlugs);
+  const hopMap = {};
+  startSlugs.forEach(s => hopMap[s] = 0);
+
+  const adj = {};
+  for (const [src, targets] of Object.entries(graphEdges)) {
+    if (!adj[src]) adj[src] = new Set();
+    for (const tgt of targets) {
+      if (!adj[tgt]) adj[tgt] = new Set();
+      adj[src].add(tgt);
+      adj[tgt].add(src);
+    }
+  }
+
+  let currentLevel = [...startSlugs];
+  for (let hop = 1; hop <= maxHops; hop++) {
+    const nextLevel = [];
+    for (const node of currentLevel) {
+      const neighbors = adj[node] ? Array.from(adj[node]) : [];
+      for (const neighbor of neighbors) {
+        if (!visited.has(neighbor)) {
+          visited.add(neighbor);
+          hopMap[neighbor] = hop;
+          nextLevel.push(neighbor);
+        }
+      }
+    }
+    currentLevel = nextLevel;
+  }
+
+  return { visited: Array.from(visited), hopMap };
+}
+
+/**
+ * Normalizes concept names and maps aliases for Semantic Disambiguation.
+ */
+function resolveSemanticAliases(term) {
+  if (!term || typeof term !== 'string') return '';
+  const cleaned = term.trim().toLowerCase();
+  const aliasMap = {
+    'js': 'javascript',
+    'ts': 'typescript',
+    'node': 'nodejs',
+    'node.js': 'nodejs',
+    'py': 'python',
+    'ai': 'tri_thuc_nhan_tao',
+    'ml': 'machine_learning',
+    'dl': 'deep_learning',
+    'rag': 'retrieval_augmented_generation',
+    'graphrag': 'retrieval_augmented_generation'
+  };
+  return aliasMap[cleaned] || cleaned;
+}
+
 /**
  * Query Retrieval Pipeline (4 phases)
  * Searches the wiki pages, synthesizes a reply, and suggests follow-up actions.
@@ -2154,7 +2337,11 @@ async function runQueryPipeline(projectId, query, contextFiles, history = [], ac
       content = await fs.readFile(filePath, 'utf-8');
     } catch (e) {}
     
-    const tokens = content.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+    const rawWords = content.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [];
+    const tokens = [...rawWords];
+    for (let i = 0; i < rawWords.length - 1; i++) {
+      tokens.push(`${rawWords[i]}_${rawWords[i+1]}`);
+    }
     fileTokens[slug] = tokens;
     docLengths[slug] = tokens.length;
     avgDocLength += tokens.length;
@@ -2267,13 +2454,37 @@ async function runQueryPipeline(projectId, query, contextFiles, history = [], ac
     }
   }
 
-  // Combine & Rank 4-Signal Relevance Model for mdFiles
+  // 5. Advanced GraphRAG: PageRank & Reciprocal Rank Fusion (RRF) Engine
+  const allSlugs = mdFiles.map(f => f.replace('.md', ''));
+  const edgeList = [];
+  for (const [src, targets] of Object.entries(graphEdges)) {
+    for (const tgt of targets) {
+      edgeList.push({ source: src, target: tgt });
+    }
+  }
+  const pageRankScores = computePageRank(allSlugs, edgeList);
+
+  // Build ranked lists for RRF
+  const denseSorted = [...allSlugs].sort((a, b) => (denseScores[b] || 0) - (denseScores[a] || 0));
+  const sparseSorted = [...allSlugs].sort((a, b) => (sparseScores[b] || 0) - (sparseScores[a] || 0));
+  const pageRankSorted = [...allSlugs].sort((a, b) => (pageRankScores[b] || 0) - (pageRankScores[a] || 0));
+  const inDegreeSorted = [...allSlugs].sort((a, b) => (inDegrees[b] || 0) - (inDegrees[a] || 0));
+
+  const rrfScores = computeRRF({
+    dense: denseSorted,
+    sparse: sparseSorted,
+    pagerank: pageRankSorted,
+    indegree: inDegreeSorted
+  }, 60);
+
+  // Combine RRF & Link Distance into Final Relevance Score
   const rankedPages = mdFiles.map(file => {
     const slug = file.replace('.md', '');
-    
     const dense = Math.max(0, denseScores[slug] || 0);
     const sparse = sparseScores[slug] || 0;
-    const inDegree = inDegrees[slug] || 0;
+    const pr = pageRankScores[slug] || 0;
+    const inDeg = inDegrees[slug] || 0;
+    const rrf = rrfScores[slug] || 0;
     
     const dist = linkDistances[slug];
     let distanceScore = 0;
@@ -2281,45 +2492,34 @@ async function runQueryPipeline(projectId, query, contextFiles, history = [], ac
     else if (dist === 1) distanceScore = 0.8;
     else if (dist === 2) distanceScore = 0.5;
     
+    // Final score blends RRF (Graph + Vector + Keyword fusion) with Link Distance
+    const finalScore = (rrf * 0.7) + (distanceScore * 0.3);
+    
     return {
       file,
       slug,
       dense,
       sparse,
-      inDegree,
-      distanceScore
+      pr,
+      inDeg,
+      rrf,
+      distanceScore,
+      finalScore
     };
-  });
-
-  const maxSparse = Math.max(...rankedPages.map(p => p.sparse), 1);
-  const maxInDegree = Math.max(...rankedPages.map(p => p.inDegree), 1);
-
-  rankedPages.forEach(p => {
-    p.normalizedSparse = p.sparse / maxSparse;
-    p.normalizedInDegree = p.inDegree / maxInDegree;
-    
-    // Weights: Dense: 0.4, Sparse: 0.3, Graph: 0.15, Distance: 0.15
-    p.finalScore = (p.dense * 0.4) + 
-                    (p.normalizedSparse * 0.3) + 
-                    (p.normalizedInDegree * 0.15) + 
-                    (p.distanceScore * 0.15);
   });
 
   rankedPages.sort((a, b) => b.finalScore - a.finalScore);
 
-  console.log(`[Query Pipeline] Ranked pages for standalone query: "${processedQuery}":`);
+  console.log(`[GraphRAG Query Pipeline] Ranked pages via RRF + PageRank + Distance for: "${processedQuery}":`);
   rankedPages.slice(0, 5).forEach((p, idx) => {
-    console.log(`  ${idx+1}. ${p.file} | Final: ${p.finalScore.toFixed(3)} (Vector: ${p.dense.toFixed(3)}, Keyword: ${p.normalizedSparse.toFixed(3)}, InDegree: ${p.normalizedInDegree.toFixed(3)}, Distance: ${p.distanceScore.toFixed(3)})`);
+    console.log(`  ${idx+1}. ${p.file} | RRF Score: ${p.rrf.toFixed(4)} | PageRank: ${p.pr.toFixed(4)} | Final: ${p.finalScore.toFixed(4)}`);
   });
 
   // Decide candidate relevant pages
   let relevantPages = [];
   if (contextFiles && Array.isArray(contextFiles) && contextFiles.length > 0) {
     const selectedSlugs = contextFiles.map(f => f.replace('.md', ''));
-    // Always include selected files first
     const selectedFiles = mdFiles.filter(f => selectedSlugs.includes(f.replace('.md', '')));
-    
-    // The rest of the slots are filled by the top-ranked non-selected files
     const remainingCount = Math.max(0, 5 - selectedFiles.length);
     const nonSelectedRanked = rankedPages.filter(p => !selectedSlugs.includes(p.slug));
     
@@ -2328,8 +2528,17 @@ async function runQueryPipeline(projectId, query, contextFiles, history = [], ac
       ...nonSelectedRanked.slice(0, remainingCount).map(p => p.file)
     ];
   } else {
-    // Just take the top 5 ranked pages
     relevantPages = rankedPages.slice(0, 5).map(p => p.file);
+  }
+
+  // Multi-hop graph context expansion (GraphRAG multi-hop neighbors)
+  const selectedSlugsForMultiHop = relevantPages.map(f => f.replace('.md', ''));
+  const { visited: multiHopSlugs } = getMultiHopNeighbors(selectedSlugsForMultiHop, graphEdges, 2);
+  const multiHopFiles = multiHopSlugs.map(s => `${s}.md`).filter(f => existsSync(path.join(wikiDir, f)) && !relevantPages.includes(f));
+  
+  // Add up to 2 multi-hop neighbor files for contextual enrichment
+  if (multiHopFiles.length > 0) {
+    relevantPages.push(...multiHopFiles.slice(0, 2));
   }
 
   // Always include overview.md if no pages found
@@ -2348,7 +2557,16 @@ async function runQueryPipeline(projectId, query, contextFiles, history = [], ac
     if (existsSync(pagePath)) {
       try {
         const content = await fs.readFile(pagePath, 'utf-8');
-        passagesForGrading[page] = content.substring(0, 1500); // sample the first 1500 chars
+        // Sample up to 4000 chars (covering beginning, middle, and end for long documents)
+        if (content.length <= 4000) {
+          passagesForGrading[page] = content;
+        } else {
+          const part1 = content.substring(0, 2000);
+          const mid = Math.floor(content.length / 2);
+          const part2 = content.substring(mid - 500, mid + 500);
+          const part3 = content.substring(content.length - 1500);
+          passagesForGrading[page] = `${part1}\n\n[...]\n\n${part2}\n\n[...]\n\n${part3}`;
+        }
       } catch (err) {}
     }
   }
