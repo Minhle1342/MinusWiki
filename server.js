@@ -512,6 +512,13 @@ async function linkIngestedPages(projectId, newSlugs) {
 
   console.log(`[Link Ingested Pages] Processing linking for slugs:`, newSlugs);
 
+  // Ensure LanceDB vector database is synchronized for semantic cross-linking
+  try {
+    await syncProjectLanceDB(projectId);
+  } catch (err) {
+    console.error('Failed to sync project LanceDB in linkIngestedPages:', err);
+  }
+
   // Helper function to clean markdown block
   function cleanMarkdownBlock(text) {
     let clean = text.trim();

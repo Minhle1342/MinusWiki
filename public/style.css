@@ -1460,9 +1460,9 @@ body {
 }
 
 .citation-badge {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid var(--border-color);
-  color: var(--secondary);
+  background: rgba(20, 184, 166, 0.08);
+  border: 1px solid rgba(20, 184, 166, 0.25);
+  color: #14B8A6; /* Xanh ngọc bích (Turquoise) */
   padding: 2px 8px;
   border-radius: 12px;
   font-size: 0.75rem;
@@ -1474,8 +1474,21 @@ body {
 }
 
 .citation-badge:hover {
-  background: rgba(14, 165, 233, 0.1);
-  border-color: rgba(14, 165, 233, 0.3);
+  background: rgba(20, 184, 166, 0.16);
+  border-color: rgba(20, 184, 166, 0.5);
+  color: #2DD4BF;
+}
+
+.chat-message.assistant .message-bubble a {
+  color: #14B8A6;
+  text-decoration: none;
+  border-bottom: 1px dashed rgba(20, 184, 166, 0.5);
+  transition: all 0.2s ease;
+}
+
+.chat-message.assistant .message-bubble a:hover {
+  color: #2DD4BF;
+  border-bottom-style: solid;
 }
 
 /* Chat suggestions */
