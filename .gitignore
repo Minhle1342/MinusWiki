@@ -4,17 +4,35 @@ node_modules/
 # Logs
 logs/
 *.log
+*.jsonl
 
 # Environment files
 .env
 .env.local
+.env.*.local
 
 # Local storage and temporary files
 storage/
 tmp/
+temp/
+*.tmp
+
+# Vector DB & Local Database files
+lancedb/
+*.lance
+lancedb_vectors/
+lancedb_cache.json
+*.sqlite
+*.sqlite3
+*.db
+
+# AI Agent memory, sessions & local workspace configs
+.codingagent/
+.agents/
 
 # Editor / OS configs
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+

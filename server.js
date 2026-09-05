@@ -1438,6 +1438,53 @@ function chunkText(text, maxWords = 15000) {
 }
 
 /**
+ * Builds an alias registry map from all markdown pages in the wiki directory.
+ * Maps normalized alias strings, H1 titles, and slugs -> canonical slug.
+ */
+async function buildWikiAliasMap(wikiDir) {
+  const aliasMap = new Map();
+  if (!existsSync(wikiDir)) return aliasMap;
+
+  try {
+    const files = await fs.readdir(wikiDir);
+    const mdFiles = files.filter(f => f.endsWith('.md') && f !== 'log.md' && f !== 'index.md' && f !== 'overview.md');
+
+    for (const file of mdFiles) {
+      const canonicalSlug = file.replace('.md', '');
+      const normSlug = canonicalSlug.toLowerCase().trim().replace(/[^a-z0-9_]/g, '_');
+      aliasMap.set(normSlug, canonicalSlug);
+
+      try {
+        const raw = await fs.readFile(path.join(wikiDir, file), 'utf-8');
+        const { frontmatter, content } = parseFrontmatter(raw);
+
+        if (frontmatter && Array.isArray(frontmatter.aliases)) {
+          for (const alias of frontmatter.aliases) {
+            const normAlias = String(alias).toLowerCase().trim().replace(/[^a-z0-9_]/g, '_');
+            if (normAlias) {
+              aliasMap.set(normAlias, canonicalSlug);
+            }
+          }
+        }
+
+        const h1Match = content.match(/^#\s+(.+)$/m);
+        if (h1Match) {
+          const normH1 = h1Match[1].toLowerCase().trim().replace(/[^a-z0-9_]/g, '_');
+          if (normH1) {
+            aliasMap.set(normH1, canonicalSlug);
+          }
+        }
+      } catch (e) {
+        // Skip unreadable files
+      }
+    }
+  } catch (err) {
+    console.error('Error building wiki alias map:', err);
+  }
+  return aliasMap;
+}
+
+/**
  * Merge list of concepts (e.g. from multiple chunks)
  */
 function mergeConcepts(allConceptsList) {
@@ -1450,9 +1497,14 @@ function mergeConcepts(allConceptsList) {
         const existing = mergedMap.get(slug);
         existing.definition = (existing.definition + ' | ' + concept.definition).substring(0, 500);
         existing.content = existing.content + '\n\n' + concept.content;
-        existing.related = [...new Set([...existing.related, ...(concept.related || [])])];
+        existing.related = [...new Set([...(existing.related || []), ...(concept.related || [])])];
+        existing.aliases = [...new Set([...(existing.aliases || []), ...(concept.aliases || [])])];
       } else {
-        mergedMap.set(slug, { ...concept, slug });
+        mergedMap.set(slug, {
+          ...concept,
+          slug,
+          aliases: Array.isArray(concept.aliases) ? concept.aliases : []
+        });
       }
     }
   }
@@ -1483,6 +1535,7 @@ async function runIngestPipeline(projectId, sourceName, text) {
         {
           "name": "Tên khái niệm (ví dụ: Trí tuệ nhân tạo)",
           "slug": "slug_viet_tat_khong_dau_viet_lien_hoac_noi_bang_gach_duoi (ví dụ: tri_tue_nhan_tao)",
+          "aliases": ["biến thể tên gọi 1", "tên tiếng Anh", "tên viết tắt (ví dụ: AI, Artificial Intelligence)"],
           "definition": "Định nghĩa ngắn gọn, rõ ràng (1-2 câu) bằng tiếng Việt",
           "content": "Nội dung chi tiết giải thích sâu về khái niệm này. Sử dụng định dạng Markdown phong phú (tiêu đề ##, ###, danh sách bullet points, bảng biểu, công thức...). Nội dung này phải toàn diện và tự chứa đựng.",
           "related": ["slug_khai_niem_lien_quan_1", "slug_khai_niem_lien_quan_2"]
@@ -1518,6 +1571,7 @@ async function runIngestPipeline(projectId, sourceName, text) {
       const fallbackConcept = {
         name: baseName.replace(/_/g, ' '),
         slug: baseName.toLowerCase().replace(/[^a-z0-9_]/g, '_').substring(0, 50),
+        aliases: [],
         definition: `Tài liệu nạp từ file ${sourceName}.`,
         content: text,
         related: []
@@ -1525,21 +1579,49 @@ async function runIngestPipeline(projectId, sourceName, text) {
       mergedConcepts.push(fallbackConcept);
     }
 
-    // Step 2: Synthesis & File Integration
+    // Step 2: Synthesis & File Integration (with Semantic Entity Resolution & Single-Pass Merge)
     const files = await fs.readdir(wikiDir);
     const existingSlugs = files.filter(f => f.endsWith('.md')).map(f => f.replace('.md', ''));
+    const aliasMap = await buildWikiAliasMap(wikiDir);
 
     for (const concept of mergedConcepts) {
-      const pagePath = path.join(wikiDir, `${concept.slug}.md`);
+      // Resolve canonical slug using alias registry or exact match
+      let targetSlug = concept.slug;
+      const candidateKeys = [
+        concept.slug.toLowerCase().trim().replace(/[^a-z0-9_]/g, '_'),
+        concept.name.toLowerCase().trim().replace(/[^a-z0-9_]/g, '_'),
+        ...(concept.aliases || []).map(a => String(a).toLowerCase().trim().replace(/[^a-z0-9_]/g, '_'))
+      ];
+
+      for (const key of candidateKeys) {
+        if (aliasMap.has(key)) {
+          targetSlug = aliasMap.get(key);
+          break;
+        }
+      }
+
+      const pagePath = path.join(wikiDir, `${targetSlug}.md`);
       let bodyContent = '';
       let frontmatter = {};
       let contradiction = null;
+      let existingContent = null;
+      let parsed = null;
 
       if (existsSync(pagePath)) {
-        // Merge with existing page
-        const existingContent = await fs.readFile(pagePath, 'utf-8');
-        const parsed = parseFrontmatter(existingContent);
+        // --- STAGE 3: SNAPSHOT BACKUP BEFORE MERGE ---
+        existingContent = await fs.readFile(pagePath, 'utf-8');
+        parsed = parseFrontmatter(existingContent);
 
+        try {
+          const revisionsDir = path.join(PROJECTS_DIR, projectId, 'revisions', targetSlug);
+          await fs.mkdir(revisionsDir, { recursive: true });
+          const revTimestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          await fs.writeFile(path.join(revisionsDir, `${revTimestamp}.md`), existingContent, 'utf-8');
+        } catch (revErr) {
+          console.error(`Failed to save revision snapshot for ${targetSlug}:`, revErr);
+        }
+
+        // Merge sources and aliases
         let sources = parsed.frontmatter.sources || [];
         if (!Array.isArray(sources)) {
           sources = sources ? [sources] : [];
@@ -1547,48 +1629,39 @@ async function runIngestPipeline(projectId, sourceName, text) {
         if (!sources.includes(sourceName)) {
           sources.push(sourceName);
         }
+
+        let existingAliases = parsed.frontmatter.aliases || [];
+        if (!Array.isArray(existingAliases)) {
+          existingAliases = existingAliases ? [existingAliases] : [];
+        }
+        const combinedAliases = Array.from(new Set([...existingAliases, ...(concept.aliases || [])]));
+
         frontmatter = {
           ...parsed.frontmatter,
-          sources
+          sources,
+          aliases: combinedAliases,
+          lastUpdated: new Date().toISOString(),
+          revisionsCount: ((parsed.frontmatter.revisionsCount || 0) + 1)
         };
 
-        // Check for contradictions before merging
-        try {
-          const checkSystem = `
-          Bạn là chuyên gia kiểm định chất lượng tri thức bằng tiếng Việt.
-          Hãy so sánh nội dung Wiki hiện tại và thông tin mới nhận được.
-          Nhiệm vụ của bạn là phát hiện xem có mâu thuẫn hay trái ngược trực tiếp nào về số liệu, ngày tháng, định nghĩa hoặc khẳng định khoa học giữa hai văn bản hay không.
-          Nếu có mâu thuẫn, hãy viết 1 câu mô tả ngắn gọn mâu thuẫn đó bằng tiếng Việt.
-          Nếu không có mâu thuẫn nào, trả về chính xác từ khóa: NO_CONTRADICTION
-          `;
-          const checkUser = `
-          === NỘI DUNG WIKI HIỆN TẠI ===
-          ${parsed.content}
-
-          === THÔNG TIN MỚI CẦN BỔ SUNG ===
-          Định nghĩa mới: ${concept.definition}
-          Nội dung mới: ${concept.content}
-          `;
-
-          console.log(`Checking contradiction for ${concept.slug}...`);
-          const checkRes = await callLLM(checkSystem, checkUser, false);
-          if (checkRes && checkRes.trim() !== 'NO_CONTRADICTION' && !checkRes.trim().includes('NO_CONTRADICTION')) {
-            contradiction = checkRes.trim();
-            console.log(`Contradiction detected in ${concept.slug}: ${contradiction}`);
-          }
-        } catch (err) {
-          console.error(`Error checking contradiction for ${concept.slug}:`, err);
-        }
-
-        const mergeSystem = `
-        Bạn là chuyên gia biên soạn Wiki chuyên nghiệp bằng tiếng Việt.
-        Nhiệm vụ của bạn là tích hợp thông tin mới về khái niệm "${concept.name}" vào nội dung trang Wiki hiện tại của nó.
-        Hãy giữ nguyên các tiêu đề, định dạng cũ, không làm mất bất kỳ thông tin cũ nào, đồng thời thêm thông tin mới một cách logic.
-        Duy trì và bổ sung các liên kết markdown định dạng [Tên Khái Niệm](slug.md) tới các khái niệm khác.
-        Đầu ra phải là toàn bộ nội dung Markdown mới của trang (không bao gồm frontmatter), không chứa bất kỳ giải thích nào bên ngoài.
+        // --- STAGE 2: SINGLE-PASS LLM MERGE & CONTRADICTION DETECTION ---
+        const singlePassSystem = `
+        Bạn là chuyên gia biên soạn và kiểm định chất lượng Wiki bằng tiếng Việt.
+        Nhiệm vụ của bạn là thực hiện 2 việc đồng thời trong 1 phản hồi duy nhất cho khái niệm "${concept.name}":
+        
+        1. KIỂM ĐỊNH MÂU THUẪN: So sánh nội dung Wiki hiện tại và thông tin mới. Nếu có mâu thuẫn hay trái ngược trực tiếp về số liệu, ngày tháng, định nghĩa hoặc khẳng định khoa học, hãy ghi 1 câu mô tả mâu thuẫn ở dòng đầu tiên theo cú pháp:
+        [CONTRADICTION: <mô tả ngắn gọn mâu thuẫn bằng tiếng Việt>]
+        Nếu KHÔNG có mâu thuẫn, dòng đầu tiên PHẢI là:
+        [CONTRADICTION: NONE]
+        
+        2. HỢP NHẤT TRI THỨC: Phía dưới dòng CONTRADICTION, hãy xuất toàn bộ nội dung Markdown mới của trang Wiki:
+        - Giữ nguyên các tiêu đề, cấu trúc, không làm mất bất kỳ thông tin cũ nào.
+        - Tích hợp thông tin mới một cách logic và khoa học.
+        - Duy trì và bổ sung các liên kết markdown định dạng [Tên Khái Niệm](slug.md) tới các khái niệm khác.
+        - Không kèm frontmatter hay bất kỳ giải thích nào bên ngoài.
         `;
 
-        const mergeUser = `
+        const singlePassUser = `
         === NỘI DUNG WIKI HIỆN TẠI ===
         ${parsed.content}
 
@@ -1598,15 +1671,30 @@ async function runIngestPipeline(projectId, sourceName, text) {
         `;
 
         try {
-          bodyContent = await callLLM(mergeSystem, mergeUser, false);
+          console.log(`Single-pass merge & contradiction check for ${targetSlug}...`);
+          const rawResponse = await callLLM(singlePassSystem, singlePassUser, false);
+          
+          const contradictionMatch = rawResponse.match(/^\[CONTRADICTION:\s*(.+?)\]/m);
+          if (contradictionMatch) {
+            const val = contradictionMatch[1].trim();
+            if (val !== 'NONE' && !val.includes('NONE') && val.toLowerCase() !== 'no_contradiction') {
+              contradiction = val;
+              console.log(`Contradiction detected in ${targetSlug}: ${contradiction}`);
+            }
+            bodyContent = rawResponse.replace(/^\[CONTRADICTION:\s*.+?\]\s*/m, '').trim();
+          } else {
+            bodyContent = rawResponse.trim();
+          }
         } catch (err) {
-          console.error(`Failed to merge concept ${concept.slug}:`, err);
+          console.error(`Failed to single-pass merge concept ${targetSlug}:`, err);
           bodyContent = parsed.content + `\n\n## Cập nhật bổ sung từ ${sourceName}\n${concept.content}`;
         }
       } else {
         // Create new page
         frontmatter = {
-          sources: [sourceName]
+          sources: [sourceName],
+          aliases: concept.aliases || [],
+          created: new Date().toISOString()
         };
 
         const createSystem = `
@@ -1626,7 +1714,7 @@ async function runIngestPipeline(projectId, sourceName, text) {
         try {
           bodyContent = await callLLM(createSystem, createUser, false);
         } catch (err) {
-          console.error(`Failed to create page for ${concept.slug}, using basic layout:`, err);
+          console.error(`Failed to create page for ${targetSlug}, using basic layout:`, err);
           bodyContent = `# ${concept.name}\n\n> **Định nghĩa:** ${concept.definition}\n\n${concept.content}\n\n## Khái niệm liên quan\n${(concept.related || []).map(r => `- [${r.replace(/_/g, ' ')}](${r}.md)`).join('\n')}`;
         }
       }
@@ -1644,7 +1732,6 @@ async function runIngestPipeline(projectId, sourceName, text) {
       const parsedBody = parseFrontmatter(cleanBody);
       delete parsedBody.frontmatter.title;
       delete parsedBody.frontmatter.tags;
-      delete parsedBody.frontmatter.created;
       delete parsedBody.frontmatter.source;
 
       frontmatter = {
@@ -1660,9 +1747,16 @@ async function runIngestPipeline(projectId, sourceName, text) {
       const finalPageContent = stringifyFrontmatter(frontmatter, parsedBody.content.trim());
       await fs.writeFile(pagePath, finalPageContent);
 
-      // Add new slug to local existing slugs so subsequent iterations can interlink
-      if (!existingSlugs.includes(concept.slug)) {
-        existingSlugs.push(concept.slug);
+      // Register new alias/slug to local map & slugs list
+      if (!existingSlugs.includes(targetSlug)) {
+        existingSlugs.push(targetSlug);
+        aliasMap.set(targetSlug.toLowerCase().replace(/[^a-z0-9_]/g, '_'), targetSlug);
+      }
+      if (frontmatter.aliases && Array.isArray(frontmatter.aliases)) {
+        for (const alias of frontmatter.aliases) {
+          const normAlias = String(alias).toLowerCase().trim().replace(/[^a-z0-9_]/g, '_');
+          if (normAlias) aliasMap.set(normAlias, targetSlug);
+        }
       }
     }
 
@@ -3745,143 +3839,207 @@ app.post('/api/projects/:id/wiki/auto-link', async (req, res) => {
  */
 app.post('/api/projects/:id/wiki/auto-link-all', async (req, res) => {
   const { id } = req.params;
-  const { orphans } = req.body;
   const wikiDir = path.join(PROJECTS_DIR, id, 'wiki');
 
   if (!existsSync(wikiDir)) {
     return res.status(404).json({ error: 'Wiki directory not found' });
   }
 
-  if (!orphans || !Array.isArray(orphans) || orphans.length === 0) {
-    return res.status(400).json({ error: 'Missing required parameters' });
-  }
-
-  try {
-    const updatedTargets = [];
-    const logFilePath = path.join(wikiDir, 'log.md');
-    const timestamp = new Date().toISOString();
-    const existingFiles = await fs.readdir(wikiDir);
-    const mdFiles = existingFiles.filter(f => f.endsWith('.md'));
-
-    // Read all other pages' summaries/contents for AI context
-    const allPagesData = [];
-    for (const file of mdFiles) {
-      if (file === 'log.md' || file === 'index.md' || file === 'overview.md') continue;
-      const content = await fs.readFile(path.join(wikiDir, file), 'utf-8');
-      const { frontmatter, content: pureContent } = parseFrontmatter(content);
-      const title = frontmatter.title || file;
-      allPagesData.push(`File: ${file}\nTiêu đề: ${title}\nContent: ${pureContent.substring(0, 1500)}...`);
+  // Support both new single-page payload and legacy multi-page payload
+  const isSinglePage = req.body.orphan_page_id || req.body.file_path;
+  
+  if (isSinglePage) {
+    let orphanPageId = req.body.orphan_page_id || (req.body.file_path ? path.basename(req.body.file_path) : '');
+    if (!orphanPageId) {
+      return res.status(400).json({ error: 'Missing required parameter: orphan_page_id' });
+    }
+    if (!orphanPageId.endsWith('.md')) {
+      orphanPageId += '.md';
     }
 
-    const contextContent = allPagesData.join('\n\n---\n\n');
+    const maxCandidates = parseInt(req.body.max_candidates, 10) || 3;
+    const contentParam = req.body.content || '';
 
-    for (const orph of orphans) {
-      const { filename: orphanFilename, title: orphanTitle } = orph;
-      if (!orphanFilename) continue;
-      
-      const orphanPath = path.join(wikiDir, orphanFilename);
-      if (!existsSync(orphanPath)) continue;
-      
-      const orphanContent = await fs.readFile(orphanPath, 'utf-8');
-      const { content: pureOrphanContent } = parseFrontmatter(orphanContent);
+    try {
+      const files = await fs.readdir(wikiDir);
+      const mdFiles = files.filter(f => f.endsWith('.md') && f !== 'index.md' && f !== 'overview.md' && f !== 'log.md');
 
-      const systemPrompt = `
-      Bạn là chuyên gia phân tích và kết nối tri thức. Nhiệm vụ của bạn là liên kết một "trang mồ côi" vào hệ thống Wiki hiện tại.
-      Đọc nội dung trang mồ côi và nội dung các trang khác.
-      Tìm MỘT trang khác có nội dung liên quan mật thiết nhất đến chủ đề của trang mồ côi (có thể dựa trên tiêu đề hoặc nội dung).
-      Sau đó, tìm MỘT TỪ KHÓA HOẶC CỤM TỪ CỤ THỂ đang có sẵn trong nội dung của trang đích, và đề xuất thay thế từ khóa đó thành một wikilink tới trang mồ côi.
-      Ví dụ, nếu trang đích có chữ "containerization" và trang mồ côi là "Docker_Container.md", bạn hãy trả về từ khóa "containerization" và nội dung thay thế là "[containerization](./Docker_Container.md)".
+      const pageTitles = {};
+      const inboundLinks = {};
+      const outboundLinks = {};
 
-      LƯU Ý QUAN TRỌNG:
-      1. Từ khóa bạn chọn (exactKeyword) PHẢI TỒN TẠI CHÍNH XÁC trong nội dung trang đích (không tính phần metadata/frontmatter). Nó phân biệt hoa thường và dấu cách, hãy trích xuất y nguyên.
-      2. Nên tìm những từ khóa liên quan đến trang mồ côi.
-      3. Nếu không tìm được vị trí nào phù hợp để chèn, hãy trả về mảng rỗng [].
+      // Initialize
+      for (const file of mdFiles) {
+        inboundLinks[file] = [];
+        outboundLinks[file] = [];
+      }
 
-      Đầu ra phải là một mảng JSON có định dạng:
-      [
-        {
-          "targetFile": "ten_file_dich.md",
-          "exactKeyword": "từ khóa chính xác trong file đích",
-          "replacement": "[từ khóa chính xác trong file đích](./ten_file_mo_coi.md)"
+      // Scan graph G = (V, E)
+      for (const file of mdFiles) {
+        const filePath = path.join(wikiDir, file);
+        let rawContent = '';
+        if (file === orphanPageId && contentParam) {
+          rawContent = contentParam;
+        } else {
+          rawContent = await fs.readFile(filePath, 'utf-8');
         }
-      ]
-      Chỉ trả về JSON, không kèm giải thích ngoài.
-      `;
 
-      const userPrompt = `
-      Trang mồ côi cần kết nối: ${orphanFilename}
-      Nội dung trang mồ côi:
-      ${pureOrphanContent.substring(0, 1500)}
+        const { content } = parseFrontmatter(rawContent);
 
-      Nội dung các trang khác (đã cắt bớt):
-      ${contextContent}
-      `;
+        // Title
+        let title = file.replace('.md', '').replace(/_/g, ' ');
+        const h1Match = content.match(/^#\s+(.+)$/m);
+        if (h1Match) {
+          title = h1Match[1].trim();
+        }
+        pageTitles[file] = title;
 
-      try {
-        const responseText = await callLLM(systemPrompt, userPrompt, true);
-        const suggestions = parseLLMJSON(responseText);
+        const addEdge = (target) => {
+          const targetNormalized = target.trim().replace(/ /g, '_').toLowerCase();
+          const matchedFile = mdFiles.find(f => {
+            const fNorm = f.toLowerCase();
+            return fNorm === targetNormalized || fNorm === (targetNormalized + '.md');
+          });
 
-        if (Array.isArray(suggestions) && suggestions.length > 0) {
-          for (const sug of suggestions) {
-            let targetFilename = sug.targetFile;
-            if (!targetFilename) continue;
-            targetFilename = path.basename(targetFilename.trim());
-            if (!targetFilename.endsWith('.md')) {
-              targetFilename += '.md';
+          if (matchedFile && matchedFile !== file) {
+            if (!inboundLinks[matchedFile].includes(file)) {
+              inboundLinks[matchedFile].push(file);
             }
-
-            const matchedFile = existingFiles.find(
-              f => f.toLowerCase() === targetFilename.toLowerCase()
-            );
-
-            if (!matchedFile || matchedFile.toLowerCase() === orphanFilename.toLowerCase()) {
-              continue;
-            }
-
-            const targetPath = path.join(wikiDir, matchedFile);
-            let rawTargetContent = await fs.readFile(targetPath, 'utf-8');
-            const { frontmatter, content } = parseFrontmatter(rawTargetContent);
-
-            if (!content.includes(sug.exactKeyword)) {
-              console.warn(`[Auto-Link All] Exact keyword "${sug.exactKeyword}" not found in ${matchedFile}`);
-              continue;
-            }
-
-            // Perform a replacement only on the first match to avoid messing up formatting
-            const newContent = content.replace(sug.exactKeyword, sug.replacement);
-            if (newContent !== content) {
-              const finalPageContent = stringifyFrontmatter(frontmatter, newContent);
-              await fs.writeFile(targetPath, finalPageContent, 'utf-8');
-              if (!updatedTargets.includes(matchedFile)) {
-                updatedTargets.push(matchedFile);
-              }
-
-              // Log to log.md
-              try {
-                const targetCleanName = matchedFile.replace('.md', '').replace(/_/g, ' ');
-                await fs.appendFile(
-                  logFilePath,
-                  `\n- [${timestamp}] AI đã tự động chèn liên kết ngữ cảnh vào [${targetCleanName}](${matchedFile}) tới trang mồ côi [${orphanTitle}](${orphanFilename})\n`
-                );
-              } catch (err) {
-                console.error('Failed to append to log.md in auto-link-all:', err);
-              }
+            if (!outboundLinks[file].includes(matchedFile)) {
+              outboundLinks[file].push(matchedFile);
             }
           }
+        };
+
+        // Match markdown links
+        const mdLinkRegex = /\[.*?\]\((?:\.\/)?([^)]+?\.md)\)/g;
+        let mdMatch;
+        while ((mdMatch = mdLinkRegex.exec(content)) !== null) {
+          const targetFilename = path.basename(mdMatch[1]);
+          addEdge(targetFilename);
         }
-      } catch (err) {
-        console.error('Failed to process orphan with AI in auto-link-all:', err);
+
+        // Match Wikilinks
+        const wikiLinkRegex = /\[\[([^|\]]+)(?:\|[^\]]+)?\]\]/g;
+        let wikiMatch;
+        while ((wikiMatch = wikiLinkRegex.exec(content)) !== null) {
+          const targetName = wikiMatch[1];
+          addEdge(targetName);
+        }
       }
+
+      // Check if target is a valid orphan: deg-(v) = 0 and deg+(v) = 0
+      const isOrphan = inboundLinks[orphanPageId] && inboundLinks[orphanPageId].length === 0 && outboundLinks[orphanPageId] && outboundLinks[orphanPageId].length === 0;
+
+      // Extract all orphans
+      const orphansList = [];
+      for (const file of mdFiles) {
+        if (file !== 'purpose.md' && inboundLinks[file].length === 0 && outboundLinks[file].length === 0) {
+          orphansList.push({ filename: file, title: pageTitles[file] });
+        }
+      }
+
+      return res.json({
+        status: isOrphan ? 'STEP_1_SUCCESS' : 'FAILED',
+        processed_at: new Date().toISOString(),
+        step: 1,
+        message: isOrphan 
+          ? `Step 1 (Graph Linting) completed. "${orphanPageId}" is a valid orphan page.` 
+          : `Step 1 (Graph Linting) failed. "${orphanPageId}" is not a valid orphan page (deg- = ${inboundLinks[orphanPageId]?.length || 0}, deg+ = ${outboundLinks[orphanPageId]?.length || 0}).`,
+        is_orphan: isOrphan,
+        all_orphans: orphansList
+      });
+    } catch (error) {
+      console.error('Error in auto-link-all step 1:', error);
+      return res.status(500).json({
+        status: 'FAILED',
+        processed_at: new Date().toISOString(),
+        error: error.message
+      });
+    }
+  } else {
+    // Legacy support for multi-page (req.body.orphans)
+    const { orphans } = req.body;
+    if (!orphans || !Array.isArray(orphans) || orphans.length === 0) {
+      return res.status(400).json({ error: 'Missing required parameter: orphans or orphan_page_id' });
     }
 
-    if (updatedTargets.length === 0) {
-      return res.json({ success: true, message: 'Không có liên kết mới nào được tạo (không tìm thấy từ khóa chính xác trong ngữ cảnh hoặc AI không có đề xuất).', updatedTargets });
-    }
+    try {
+      const files = await fs.readdir(wikiDir);
+      const mdFiles = files.filter(f => f.endsWith('.md') && f !== 'index.md' && f !== 'overview.md' && f !== 'log.md');
 
-    res.json({ success: true, message: 'Đã tự động liên kết ngữ cảnh các trang mồ côi thành công!', updatedTargets });
-  } catch (error) {
-    console.error('Error in auto-linking all:', error);
-    res.status(500).json({ error: 'Failed to auto-link all pages' });
+      const pageTitles = {};
+      const inboundLinks = {};
+      const outboundLinks = {};
+
+      for (const file of mdFiles) {
+        inboundLinks[file] = [];
+        outboundLinks[file] = [];
+      }
+
+      for (const file of mdFiles) {
+        const filePath = path.join(wikiDir, file);
+        const rawContent = await fs.readFile(filePath, 'utf-8');
+        const { content } = parseFrontmatter(rawContent);
+
+        let title = file.replace('.md', '').replace(/_/g, ' ');
+        const h1Match = content.match(/^#\s+(.+)$/m);
+        if (h1Match) {
+          title = h1Match[1].trim();
+        }
+        pageTitles[file] = title;
+
+        const addEdge = (target) => {
+          const targetNormalized = target.trim().replace(/ /g, '_').toLowerCase();
+          const matchedFile = mdFiles.find(f => {
+            const fNorm = f.toLowerCase();
+            return fNorm === targetNormalized || fNorm === (targetNormalized + '.md');
+          });
+
+          if (matchedFile && matchedFile !== file) {
+            if (!inboundLinks[matchedFile].includes(file)) {
+              inboundLinks[matchedFile].push(file);
+            }
+            if (!outboundLinks[file].includes(matchedFile)) {
+              outboundLinks[file].push(matchedFile);
+            }
+          }
+        };
+
+        const mdLinkRegex = /\[.*?\]\((?:\.\/)?([^)]+?\.md)\)/g;
+        let mdMatch;
+        while ((mdMatch = mdLinkRegex.exec(content)) !== null) {
+          const targetFilename = path.basename(mdMatch[1]);
+          addEdge(targetFilename);
+        }
+
+        const wikiLinkRegex = /\[\[([^|\]]+)(?:\|[^\]]+)?\]\]/g;
+        let wikiMatch;
+        while ((wikiMatch = wikiLinkRegex.exec(content)) !== null) {
+          const targetName = wikiMatch[1];
+          addEdge(targetName);
+        }
+      }
+
+      const verifiedOrphans = [];
+      for (const orph of orphans) {
+        const fname = orph.filename;
+        const isOrphan = inboundLinks[fname] && inboundLinks[fname].length === 0 && outboundLinks[fname] && outboundLinks[fname].length === 0;
+        if (isOrphan) {
+          verifiedOrphans.push(orph);
+        }
+      }
+
+      return res.json({
+        success: true,
+        step: 1,
+        message: `Step 1 completed. Verified ${verifiedOrphans.length}/${orphans.length} as actual orphans.`,
+        verifiedOrphans
+      });
+    } catch (error) {
+      console.error('Error in auto-link-all step 1 (legacy):', error);
+      return res.status(500).json({ error: error.message });
+    }
   }
 });
 

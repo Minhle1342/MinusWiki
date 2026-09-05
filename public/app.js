@@ -282,6 +282,30 @@ const SettingsManager = {
       this.form.addEventListener('submit', (e) => this.handleSave(e));
     }
 
+    const copyBtn = document.getElementById('btn-copy-google-key');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', () => {
+        const val = this.googleKeyInput ? this.googleKeyInput.value : '';
+        if (!val) {
+          app.showToast('Không có dữ liệu Google API Key để sao chép!', 'warning');
+          return;
+        }
+        const pw = prompt('Nhập mật khẩu để sao chép Google API Key:');
+        if (pw === null) return; // User cancelled
+        if (pw === 'Minhle1342@') {
+          navigator.clipboard.writeText(val)
+            .then(() => {
+              app.showToast('Đã sao chép Google API Key vào clipboard!', 'success');
+            })
+            .catch(err => {
+              app.showToast('Không thể sao chép vào bộ nhớ tạm.', 'error');
+            });
+        } else {
+          app.showToast('Mật khẩu không chính xác!', 'error');
+        }
+      });
+    }
+
     // Check configuration status on load
     this.checkFirstTime();
   },
