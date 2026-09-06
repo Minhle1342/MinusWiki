@@ -2673,34 +2673,35 @@ const QuizManager = {
 
   async loadWikiNodes() {
     if (!app.state.currentProjectId) return;
-    const container = document.getElementById('quiz-nodes-checkboxes');
-    if (!container) return;
 
     try {
       const res = await fetch(`/api/projects/${app.state.currentProjectId}/wiki`);
       const data = await res.json();
       if (data.success && Array.isArray(data.pages)) {
         this.wikiPages = data.pages; // Store for keyword search
-        container.innerHTML = '';
-        if (data.pages.length === 0) {
-          container.innerHTML = '<span style="font-size: 11px; color: var(--text-muted);">Chưa có trang Wiki nào.</span>';
-          return;
-        }
+        const container = document.getElementById('quiz-nodes-checkboxes');
+        if (container) {
+          container.innerHTML = '';
+          if (data.pages.length === 0) {
+            container.innerHTML = '<span style="font-size: 11px; color: var(--text-muted);">Chưa có trang Wiki nào.</span>';
+            return;
+          }
 
-        data.pages.forEach(page => {
-          const filename = page.filename || page.slug + '.md';
-          const title = page.title || filename;
-          const label = document.createElement('label');
-          label.className = 'checkbox-label';
-          label.style.cssText = 'display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 400; cursor: pointer; color: var(--text-secondary);';
-          
-          const isCurrentActive = app.state.currentFilename === filename;
-          label.innerHTML = `
-            <input type="checkbox" class="quiz-node-checkbox" value="${filename}" ${isCurrentActive ? 'checked' : ''} style="width: 12px; height: 12px; accent-color: var(--primary-color);">
-            <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${title}">${title}</span>
-          `;
-          container.appendChild(label);
-        });
+          data.pages.forEach(page => {
+            const filename = page.filename || page.slug + '.md';
+            const title = page.title || filename;
+            const label = document.createElement('label');
+            label.className = 'checkbox-label';
+            label.style.cssText = 'display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 400; cursor: pointer; color: var(--text-secondary);';
+            
+            const isCurrentActive = app.state.currentFilename === filename;
+            label.innerHTML = `
+              <input type="checkbox" class="quiz-node-checkbox" value="${filename}" ${isCurrentActive ? 'checked' : ''} style="width: 12px; height: 12px; accent-color: var(--primary-color);">
+              <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${title}">${title}</span>
+            `;
+            container.appendChild(label);
+          });
+        }
 
         this.initQuizScopeHandlers();
       }
@@ -2738,8 +2739,13 @@ const QuizManager = {
 
     if (keywordInput && !keywordInput._hasInputListener) {
       keywordInput._hasInputListener = true;
+      let debounceTimer = null;
       keywordInput.addEventListener('input', (e) => {
-        this.filterWikiNodesByKeyword(e.target.value);
+        const val = e.target.value;
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          this.filterWikiNodesByKeyword(val);
+        }, 150);
       });
     }
 
@@ -2760,23 +2766,20 @@ const QuizManager = {
               .replace(/đ/g, 'd').replace(/Đ/g, 'D');
   },
 
-  filterWikiNodesByKeyword(query) {
+  async filterWikiNodesByKeyword(query) {
     const suggestionsContainer = document.getElementById('quiz-keyword-suggestions');
     const matchCountEl = document.getElementById('quiz-keyword-match-count');
     if (!suggestionsContainer) return;
 
     const q = (query || '').trim().toLowerCase();
     const qClean = this.removeAccents(q);
-    const pages = this.wikiPages || [];
-
-    if (pages.length === 0 && app.state.currentProjectId) {
-      this.loadWikiNodes().then(() => {
-        if (this.wikiPages && this.wikiPages.length > 0) {
-          this.filterWikiNodesByKeyword(query);
-        }
-      });
-      return;
+    
+    if ((!this.wikiPages || this.wikiPages.length === 0) && app.state.currentProjectId) {
+      suggestionsContainer.innerHTML = '<span style="font-size: 11px; color: var(--text-muted);">Đang tải danh sách trang...</span>';
+      await this.loadWikiNodes();
     }
+
+    const pages = this.wikiPages || [];
 
     // If query is empty, show all pages so the user can browse/select nodes immediately
     const matchedPages = !q ? pages : pages.filter(page => {
@@ -2823,6 +2826,9 @@ const QuizManager = {
       return;
     }
 
+    const generateBtn = document.getElementById('btn-generate-quiz');
+    if (generateBtn) generateBtn.disabled = true;
+
     const keywordContainer = document.getElementById('quiz-scope-keyword-container');
     const isKeywordMode = keywordContainer && !keywordContainer.classList.contains('hidden');
 
@@ -2832,6 +2838,7 @@ const QuizManager = {
       keywordCheckboxes.forEach(cb => selectedNodes.push(cb.value));
       if (selectedNodes.length === 0) {
         app.showToast('Vui lòng chọn ít nhất một node từ kết quả tìm kiếm từ khóa.', 'warning');
+        if (generateBtn) generateBtn.disabled = false;
         return;
       }
     } else {
@@ -2866,6 +2873,8 @@ const QuizManager = {
       console.error(err);
       dismissLoading();
       app.showToast('Lỗi kết nối khi sinh câu hỏi.', 'error');
+    } finally {
+      if (generateBtn) generateBtn.disabled = false;
     }
   },
 

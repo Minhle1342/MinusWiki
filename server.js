@@ -1505,14 +1505,30 @@ async function buildWikiAliasMap(wikiDir) {
 }
 
 /**
+ * Helper to generate a clean, standardized Vietnamese slug for filenames and cross-links
+ */
+function generateVietnameseSlug(text) {
+  if (!text) return 'node_' + Date.now();
+  return text
+    .toString()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .substring(0, 60) || ('node_' + Date.now());
+}
+
+/**
  * Merge list of concepts (e.g. from multiple chunks)
  */
 function mergeConcepts(allConceptsList) {
   const mergedMap = new Map();
   for (const concepts of allConceptsList) {
     for (const concept of concepts) {
-      if (!concept.slug || !concept.name) continue;
-      const slug = concept.slug.toLowerCase().trim().replace(/[^a-z0-9_]/g, '');
+      if (!concept.name) continue;
+      const conceptName = concept.name.trim();
+      const slug = generateVietnameseSlug(concept.slug || conceptName);
       if (mergedMap.has(slug)) {
         const existing = mergedMap.get(slug);
         existing.definition = (existing.definition + ' | ' + concept.definition).substring(0, 500);
@@ -1522,6 +1538,7 @@ function mergeConcepts(allConceptsList) {
       } else {
         mergedMap.set(slug, {
           ...concept,
+          name: conceptName,
           slug,
           aliases: Array.isArray(concept.aliases) ? concept.aliases : []
         });
@@ -1549,13 +1566,18 @@ async function runIngestPipeline(projectId, sourceName, text) {
     const extractSystem = `
     Bạn là chuyên gia phân tích tài liệu và xây dựng Cơ sở tri thức (Wiki) cá nhân bằng tiếng Việt.
     Nhiệm vụ của bạn là đọc kỹ đoạn văn bản được cung cấp và trích xuất tất cả các thực thể, định nghĩa, khái niệm quan trọng có ý nghĩa nghiên cứu/học tập lâu dài.
+    
+    Quy tắc BẮT BUỘC về Tên và Slug:
+    - \`name\`: Tiêu đề khái niệm bằng tiếng Việt **hoàn chỉnh, có dấu đầy đủ**, rõ nghĩa, trang trọng, mô tả chính xác (ví dụ: "Trí tuệ nhân tạo", "Kiến trúc Hệ thống Phân tán", "Mô hình Học sâu"). TUYỆT ĐỐI KHÔNG viết tắt khó hiểu hoặc cụt ngủn.
+    - \`slug\`: Slug chuẩn hóa không dấu, viết thường, nối bằng dấu gạch dưới \`_\` (ví dụ: "tri_tue_nhan_tao", "kien_truc_he_thong_phan_tan"), phản ánh đúng tên khái niệm.
+
     Đầu ra PHẢI là một đối tượng JSON hợp lệ có định dạng sau:
     {
       "concepts": [
         {
-          "name": "Tên khái niệm (ví dụ: Trí tuệ nhân tạo)",
-          "slug": "slug_viet_tat_khong_dau_viet_lien_hoac_noi_bang_gach_duoi (ví dụ: tri_tue_nhan_tao)",
-          "aliases": ["biến thể tên gọi 1", "tên tiếng Anh", "tên viết tắt (ví dụ: AI, Artificial Intelligence)"],
+          "name": "Tên khái niệm đầy đủ dấu tiếng Việt",
+          "slug": "slug_chuan_hoa_khong_dau",
+          "aliases": ["biến thể tên gọi 1", "tên tiếng Anh", "tên viết tắt"],
           "definition": "Định nghĩa ngắn gọn, rõ ràng (1-2 câu) bằng tiếng Việt",
           "content": "Nội dung chi tiết giải thích sâu về khái niệm này. Sử dụng định dạng Markdown phong phú (tiêu đề ##, ###, danh sách bullet points, bảng biểu, công thức...). Nội dung này phải toàn diện và tự chứa đựng.",
           "related": ["slug_khai_niem_lien_quan_1", "slug_khai_niem_lien_quan_2"]
@@ -3948,7 +3970,7 @@ app.get('/api/projects/:id/logs', async (req, res) => {
  */
 app.post('/api/projects/:id/wiki/:filename/resolve-contradiction', async (req, res) => {
   const { id, filename } = req.params;
-  const { resolution } = req.body; // 'keep_a' or 'keep_b'
+  const { resolution } = req.body; // 'keep_a', 'keep_b', or 'auto_synthesize'
   const safeFilename = path.basename(filename);
   const filePath = path.join(PROJECTS_DIR, id, 'wiki', safeFilename.endsWith('.md') ? safeFilename : `${safeFilename}.md`);
 
@@ -3965,6 +3987,28 @@ app.post('/api/projects/:id/wiki/:filename/resolve-contradiction', async (req, r
       let finalContentText = content; // default is keep current (keep_b)
       if (resolution === 'keep_a' && frontmatter.originalContent) {
         finalContentText = frontmatter.originalContent;
+      } else if (resolution === 'auto_synthesize') {
+        const systemPrompt = `Bạn là một Trợ lý AI Quản lý Tri thức Chuyên nghiệp. Nhiệm vụ của bạn là giải quyết mâu thuẫn tri thức giữa hai phiên bản của cùng một trang Wiki.
+Hãy đọc kỹ Phiên bản Cũ (A), Phiên bản Mới (B), và Mô tả Mâu thuẫn. Sau đó, hãy tổng hợp (synthesize) thành một tài liệu Markdown hoàn chỉnh, hài hòa, giữ lại toàn bộ thông tin quan trọng từ cả hai phiên bản nhưng đã loại bỏ hoặc làm rõ các điểm mâu thuẫn.
+Đảm bảo định dạng chuẩn Markdown, giữ nguyên cấu trúc tiêu đề hợp lý và trả về duy nhất nội dung markdown đã hợp nhất. Không kèm theo lời giải thích bên ngoài.`;
+
+        const userPrompt = `### Tiêu đề trang: ${safeFilename}
+### Mô tả mâu thuẫn: ${frontmatter.contradiction || 'Không có mô tả chi tiết'}
+
+### Phiên bản Cũ (A):
+${frontmatter.originalContent || '(Trống)'}
+
+### Phiên bản Mới (B):
+${content}`;
+
+        try {
+          const synthesized = await callLLM(systemPrompt, userPrompt, false);
+          if (synthesized && synthesized.trim().length > 50) {
+            finalContentText = synthesized.trim();
+          }
+        } catch (llmErr) {
+          console.error('AI Auto-synthesis failed, falling back to current content:', llmErr);
+        }
       }
 
       delete frontmatter.contradiction;
@@ -3979,7 +4023,7 @@ app.post('/api/projects/:id/wiki/:filename/resolve-contradiction', async (req, r
         const logFilePath = path.join(wikiDir, 'log.md');
         const timestamp = new Date().toISOString();
         const pageTitle = safeFilename.replace('.md', '');
-        const choiceText = resolution === 'keep_a' ? 'dữ liệu A (Tài liệu cũ)' : 'dữ liệu B (Tài liệu mới)';
+        const choiceText = resolution === 'keep_a' ? 'dữ liệu A (Tài liệu cũ)' : (resolution === 'auto_synthesize' ? 'AI Tự động Hợp nhất' : 'dữ liệu B (Tài liệu mới)');
         await fs.appendFile(
           logFilePath,
           `\n- [${timestamp}] Đã giải quyết mâu thuẫn tri thức cho trang [${pageTitle}](${safeFilename}): Chọn ${choiceText}\n`
@@ -4464,6 +4508,14 @@ ${existingNodes.map(n => `- File: "${n.filename}", Tiêu đề: "${n.title}", T�
           if (!targetContent.includes(`[[${orphanTitle}]]`) && !targetContent.includes(orphanPageId)) {
             targetContent += linkAddition;
             await fs.writeFile(targetPath, targetContent, 'utf-8');
+
+            // Also update orphan page to link back to target (Contextual Bidirectional Backlinking)
+            const orphanFilePath = path.join(wikiDir, orphanPageId);
+            let currentOrphanContent = await fs.readFile(orphanFilePath, 'utf-8');
+            const targetTitle = pageTitles[bestMatchFile] || bestMatchFile.replace('.md', '');
+            currentOrphanContent += `\n\n## Liên kết tham khảo\n- [[${targetTitle}]]\n`;
+            await fs.writeFile(orphanFilePath, currentOrphanContent, 'utf-8');
+
             autoLinkedResults.push({
               target_file: bestMatchFile,
               target_title: pageTitles[bestMatchFile],
@@ -4472,11 +4524,41 @@ ${existingNodes.map(n => `- File: "${n.filename}", Tiêu đề: "${n.title}", T�
               action: `LLM detected operational equivalence and linked orphan "${orphanPageId}" to target "${bestMatchFile}"`
             });
 
+            // 1. Synchronize LanceDB vector database for semantic graph embeddings
+            try {
+              await syncProjectLanceDB(id);
+            } catch (syncErr) {
+              console.error('Failed to sync LanceDB after orphan bridging:', syncErr);
+            }
+
+            // 2. AI Hierarchy Structuring: Update index.md and overview.md
+            try {
+              const indexFilePath = path.join(wikiDir, 'index.md');
+              if (existsSync(indexFilePath)) {
+                let indexContent = await fs.readFile(indexFilePath, 'utf-8');
+                if (!indexContent.includes(orphanPageId)) {
+                  indexContent += `\n- [[${orphanPageId.replace('.md', '')}|${orphanTitle}]] : ${equivalenceReason}`;
+                  await fs.writeFile(indexFilePath, indexContent, 'utf-8');
+                }
+              }
+
+              const overviewFilePath = path.join(wikiDir, 'overview.md');
+              if (existsSync(overviewFilePath)) {
+                let overviewContent = await fs.readFile(overviewFilePath, 'utf-8');
+                if (!overviewContent.includes(orphanPageId)) {
+                  overviewContent += `\n\n### Khái niệm được kích hoạt từ trang mồ côi\n- [[${orphanPageId.replace('.md', '')}|${orphanTitle}]] : ${equivalenceReason}`;
+                  await fs.writeFile(overviewFilePath, overviewContent, 'utf-8');
+                }
+              }
+            } catch (hierErr) {
+              console.error('Failed to update index.md or overview.md for bridged orphan:', hierErr);
+            }
+
             // Also log to log.md
             const logPath = path.join(wikiDir, 'log.md');
             try {
               const logContent = await fs.readFile(logPath, 'utf-8');
-              const newLog = logContent + `\n- [LLM-Equivalence-Bridge] Linked activated node **${orphanTitle}** to **${pageTitles[bestMatchFile]}** | Mechanism: ${operationalMechanism || 'Equivalency'} | Reason: ${equivalenceReason} (${new Date().toISOString()})`;
+              const newLog = logContent + `\n- [Autonomous-Semantic-Bridge] Linked activated node **${orphanTitle}** to **${pageTitles[bestMatchFile]}** | Mechanism: ${operationalMechanism || 'Equivalency'} | Reason: ${equivalenceReason} (${new Date().toISOString()})`;
               await fs.writeFile(logPath, newLog, 'utf-8');
             } catch (e) {}
           }
