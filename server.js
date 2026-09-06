@@ -1952,21 +1952,23 @@ async function syncProjectLanceDB(projectId) {
       await fs.writeFile(cachePath, JSON.stringify(cache, null, 2), 'utf-8');
     }
 
-    // Build or overwrite table
-    const allRows = [];
-    for (const slug of Object.keys(cache)) {
-      for (const item of cache[slug].chunks) {
-        allRows.push({
-          slug,
-          text: item.text,
-          vector: item.vector
-        });
+    // Performance Optimization: Only rebuild or overwrite LanceDB table if cacheChanged is true
+    const db = await lancedb.connect(dbPath);
+    if (cacheChanged) {
+      const allRows = [];
+      for (const slug of Object.keys(cache)) {
+        for (const item of cache[slug].chunks) {
+          allRows.push({
+            slug,
+            text: item.text,
+            vector: item.vector
+          });
+        }
       }
-    }
 
-    if (allRows.length > 0) {
-      const db = await lancedb.connect(dbPath);
-      await db.createTable('wiki_chunks', allRows, { mode: 'overwrite' });
+      if (allRows.length > 0) {
+        await db.createTable('wiki_chunks', allRows, { mode: 'overwrite' });
+      }
     }
   } catch (err) {
     console.error('syncProjectLanceDB failed:', err);
@@ -2990,15 +2992,15 @@ Kết thúc mỗi trang bằng mục \`## Xem thêm\` nếu có liên kết liê
 \`\`\`markdown
 ## Xem thêm
 
-- [[Ten_Trang_Lien_Quan]] — Mô tả ngắn tại sao trang này liên quan.
-- [[Ten_Trang_Khac]] — Giải thích mối quan hệ cụ thể.
+- [Ten Trang Liên Quan](./ten_trang_lien_quan.md) — Mô tả ngắn tại sao trang này liên quan.
+- [Ten Trang Khác](./ten_trang_khac.md) — Giải thích mối quan hệ cụ thể.
 \`\`\`
 
 ---
 
 # Tài liệu Tham khảo
 
-- [[Pipeline_Ingest_Hai_Buoc]] — Kiến trúc xử lý tài liệu thô đầu vào của hệ thống.
+- [Pipeline Ingest Hai Bước](./pipeline_ingest_hai_buoc.md) — Kiến trúc xử lý tài liệu thô đầu vào của hệ thống.
 - [Hướng dẫn xây dựng Pipeline nhận diện mã Batch (YOLO + OCR)](./clip_https___gemini_google_com_gem_90a073a24d22_32d326e6f0af717c.md) — Vai trò của pipeline nhận diện trong kiến trúc tri thức chung.
 `;
     await fs.writeFile(path.join(wikiPath, 'purpose.md'), purposeContent);
@@ -3411,6 +3413,55 @@ app.delete('/api/projects/:id/sources/:filename', async (req, res) => {
 // --- Wiki Content Reading & Editing Endpoints ---
 
 /**
+ * GET /api/projects/:id/wiki
+ * Get list of all wiki pages in the project for quiz selection & keyword search
+ */
+app.get('/api/projects/:id/wiki', async (req, res) => {
+  const { id } = req.params;
+  const wikiDir = path.join(PROJECTS_DIR, id, 'wiki');
+
+  if (!existsSync(wikiDir)) {
+    return res.json({ success: true, pages: [] });
+  }
+
+  try {
+    const files = await fs.readdir(wikiDir);
+    const mdFiles = files.filter(f => f.endsWith('.md') && f !== 'log.md');
+    const pages = [];
+
+    for (const filename of mdFiles) {
+      const filePath = path.join(wikiDir, filename);
+      try {
+        const markdown = await fs.readFile(filePath, 'utf-8');
+        const { frontmatter, content } = parseFrontmatter(markdown);
+        let title = filename.replace('.md', '').replace(/_/g, ' ');
+        const h1Match = content.match(/^#\s+(.+)$/m);
+        if (h1Match) {
+          title = h1Match[1].trim();
+        } else if (frontmatter && frontmatter.title) {
+          title = frontmatter.title;
+        }
+
+        pages.push({
+          filename,
+          slug: filename.replace('.md', ''),
+          title,
+          content,
+          frontmatter
+        });
+      } catch (err) {
+        console.error(`Error reading page ${filename}:`, err);
+      }
+    }
+
+    res.json({ success: true, pages });
+  } catch (error) {
+    console.error('Error listing wiki pages:', error);
+    res.status(500).json({ success: false, error: 'Failed to list wiki pages' });
+  }
+});
+
+/**
  * GET /api/projects/:id/wiki/:filename
  * Get raw and rendered HTML content of a wiki markdown file
  */
@@ -3594,6 +3645,157 @@ app.post('/api/maintenance/merge-wiki', async (req, res) => {
   } catch (error) {
     console.error('Error in merge-wiki endpoint:', error);
     res.status(500).json({ error: 'Failed to merge wiki context' });
+  }
+});
+
+/**
+ * POST /api/maintenance/generate-gap-node
+ * Automatically generate a new Wiki Markdown node from a research gap and link it
+ */
+app.post('/api/maintenance/generate-gap-node', async (req, res) => {
+  const { projectId, gap } = req.body;
+
+  if (!gap || !gap.gap) {
+    return res.status(400).json({ error: 'gap object with gap title is required' });
+  }
+
+  let projId = projectId;
+  if (!projId) {
+    try {
+      const files = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
+      const dirs = files.filter(f => f.isDirectory());
+      if (dirs.length > 0) {
+        projId = dirs[0].name;
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  if (!projId) {
+    return res.status(400).json({ error: 'projectId is required and could not be resolved' });
+  }
+
+  const wikiDir = path.join(PROJECTS_DIR, projId, 'wiki');
+  if (!existsSync(wikiDir)) {
+    return res.status(404).json({ error: `Wiki directory not found for project ${projId}` });
+  }
+
+  try {
+    // Read existing markdown files in wikiDir for bidirectional linking
+    let existingFiles = [];
+    try {
+      const allFiles = await fs.readdir(wikiDir);
+      existingFiles = allFiles.filter(f => f.endsWith('.md') && f !== 'log.md' && f !== 'index.md');
+    } catch (e) {
+      // ignore
+    }
+
+    const existingLinksText = existingFiles.map(f => `- [[${f.replace('.md', '')}]]`).join('\n');
+
+    // 1. Generate Markdown content using LLM with awareness of existing files
+    const systemPrompt = `Bạn là một AI chuyên gia quản lý tri thức, tổng hợp và nghiên cứu khoa học. Hãy viết một bài Wiki bằng Markdown rất chi tiết và chất lượng cao (bằng tiếng Việt) để giải quyết lỗ hổng nghiên cứu (research gap) được cung cấp. Bài viết phải có tiêu đề H1 phù hợp, nội dung phân tích sâu sắc, các đề xuất giải pháp, và ít nhất 2-3 liên kết chéo ([[]]) tới các tệp tài liệu hiện có trong dự án dưới đây để kết nối đồ thị tri thức:\n${existingLinksText}`;
+    const userPrompt = `Lỗ hổng nghiên cứu (Gap): ${gap.gap}\nMô tả chi tiết: ${gap.description || 'Không có mô tả chi tiết'}\nCác chủ đề gợi ý: ${(gap.suggested_topics || []).join(', ')}`;
+
+    let markdownContent = '';
+    try {
+      markdownContent = await callLLM(systemPrompt, userPrompt, false);
+    } catch (llmErr) {
+      console.error('LLM generation error for gap node:', llmErr);
+      markdownContent = `# ${gap.gap}\n\n## Tổng quan lỗ hổng\n${gap.description || ''}\n\n## Nội dung nghiên cứu\nĐược tự động sinh ra từ lỗ hổng nghiên cứu.\n\n## Chủ đề liên quan\n${(gap.suggested_topics || []).map(t => `- [[${t}]]`).join('\n')}\n${existingFiles.length > 0 ? `- [[${existingFiles[0].replace('.md', '')}]]` : ''}`;
+    }
+
+    // 2. Generate unique filename and title
+    const slug = gap.gap
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    const filename = `gap_node_${Date.now()}_${slug || 'topic'}.md`;
+    const filePath = path.join(wikiDir, filename);
+
+    // Add frontmatter
+    const frontmatter = `---\ntitle: "${gap.gap.replace(/"/g, '\\"')}"\nsource_type: "research_gap"\ncreated: "${new Date().toISOString()}"\n---\n\n`;
+    const fullContent = frontmatter + markdownContent;
+
+    await fs.writeFile(filePath, fullContent, 'utf-8');
+
+    // 3. Update index.md, overview.md and existing files with bidirectional links so it's NEVER an orphan node
+    const cleanFileId = filename.replace('.md', '');
+    const backlinkMarkdown = `\n- [[${cleanFileId}|${gap.gap}]]`;
+
+    const indexFilePath = path.join(wikiDir, 'index.md');
+    if (existsSync(indexFilePath)) {
+      try {
+        let indexContent = await fs.readFile(indexFilePath, 'utf-8');
+        indexContent += backlinkMarkdown;
+        await fs.writeFile(indexFilePath, indexContent, 'utf-8');
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    const overviewFilePath = path.join(wikiDir, 'overview.md');
+    if (existsSync(overviewFilePath)) {
+      try {
+        let overviewContent = await fs.readFile(overviewFilePath, 'utf-8');
+        overviewContent += `\n\n### Lỗ hổng nghiên cứu mới\n- [[${cleanFileId}|${gap.gap}]]`;
+        await fs.writeFile(overviewFilePath, overviewContent, 'utf-8');
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    if (existingFiles.length > 0) {
+      const targetExisting = existingFiles[0];
+      const targetExistingPath = path.join(wikiDir, targetExisting);
+      try {
+        let targetContent = await fs.readFile(targetExistingPath, 'utf-8');
+        targetContent += `\n\n## Liên kết nghiên cứu mới\n- [[${cleanFileId}|${gap.gap}]]`;
+        await fs.writeFile(targetExistingPath, targetContent, 'utf-8');
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // 4. Sync LanceDB and Graph database
+    try {
+      await syncProjectLanceDB(projId);
+    } catch (syncErr) {
+      console.error('Failed to sync LanceDB after generating gap node:', syncErr);
+    }
+
+    // 5. Update maintenance.json: remove this gap from gaps list
+    const maintPath = path.join(PROJECTS_DIR, projId, 'maintenance.json');
+    if (existsSync(maintPath)) {
+      try {
+        const maintRaw = await fs.readFile(maintPath, 'utf-8');
+        const maintData = JSON.parse(maintRaw);
+        if (maintData && Array.isArray(maintData.gaps)) {
+          maintData.gaps = maintData.gaps.filter(g => g.gap !== gap.gap);
+          await fs.writeFile(maintPath, JSON.stringify(maintData, null, 2), 'utf-8');
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // 5. Append to log.md
+    await fs.appendFile(
+      path.join(wikiDir, 'log.md'),
+      `\n- [${new Date().toISOString()}] Tự động sinh node tài liệu mới từ lỗ hổng nghiên cứu: "${gap.gap}" (${filename})`
+    );
+
+    res.json({
+      success: true,
+      filename,
+      title: gap.gap,
+      message: 'Đã tự động sinh node thành công'
+    });
+  } catch (error) {
+    console.error('Error in generate-gap-node endpoint:', error);
+    res.status(500).json({ error: 'Không thể tự động sinh node từ lỗ hổng nghiên cứu' });
   }
 });
 
@@ -4164,14 +4366,132 @@ app.post('/api/projects/:id/wiki/auto-link-all', async (req, res) => {
         }
       }
 
+      let autoLinkedResults = [];
+      if (isOrphan) {
+        // LLM Operational Mechanism & Characteristic Equivalence Detection Engine
+        const orphanFilePath = path.join(wikiDir, orphanPageId);
+        let orphanContent = '';
+        try {
+          orphanContent = await fs.readFile(orphanFilePath, 'utf-8');
+        } catch (e) {}
+
+        const orphanTitle = pageTitles[orphanPageId] || orphanPageId.replace('.md', '');
+
+        // Collect existing nodes info (titles + content excerpts)
+        const existingNodes = [];
+        for (const file of mdFiles) {
+          if (file === orphanPageId || file === 'purpose.md') continue;
+          const filePath = path.join(wikiDir, file);
+          try {
+            const content = await fs.readFile(filePath, 'utf-8');
+            const { content: cleanContent } = parseFrontmatter(content);
+            existingNodes.push({
+              filename: file,
+              title: pageTitles[file] || file.replace('.md', ''),
+              summary: cleanContent.slice(0, 500).replace(/\n+/g, ' ')
+            });
+          } catch (e) {}
+        }
+
+        let bestMatchFile = null;
+        let equivalenceReason = '';
+        let operationalMechanism = '';
+
+        if (existingNodes.length > 0) {
+          try {
+            const systemPrompt = `
+Bạn là Kiến trúc sĩ Đồ thị Tri thức (Knowledge Graph Architect) và Chuyên gia Phân tích Cơ chế Hoạt động (Operational Equivalence Reasoning Engine).
+Nhiệm vụ của bạn là phân tích đặc điểm, vai trò chức năng và cơ chế hoạt động (operational mechanisms & functional attributes) của một node vừa được kích hoạt liên kết (trang mồ côi) so với các node hiện có trong Đồ thị Tri thức Wiki.
+Hãy phát hiện và xác định node (trang wiki) hiện có có ĐẶC ĐIỂM và CƠ CHẾ HOẠT ĐỘNG TƯƠNG ĐƯƠNG hoặc BỔ TRỢ TRỰC TIẾP nhất với node vừa được kích hoạt.
+
+QUY TẮC PHÂN TÍCH:
+1. Đánh giá bản chất kỹ thuật, quy trình hoạt động, cấu trúc dữ liệu hoặc mô hình vận hành của node vừa kích hoạt.
+2. So sánh với các node hiện có để tìm điểm tương đồng về cơ chế (ví dụ: cùng là cơ chế cache, cùng là mô hình pub/sub, cùng thuộc lớp xử lý pipeline, cùng cơ chế authentication, v.v.).
+3. Trả về DUY NHẤT 1 chuỗi JSON hợp lệ (không kèm markdown format khác) theo cấu trúc:
+{
+  "target_file": "filename_phu_hop.md",
+  "equivalence_reason": "Giải thích ngắn gọn đặc điểm và cơ chế hoạt động tương đương giữa 2 node",
+  "operational_mechanism": "Tên/mô tả ngắn về cơ chế vận hành chung",
+  "confidence": 0.95
+}
+`;
+
+            const userPrompt = `
+=== NODE VỪA ĐƯỢC KÍCH HOẠT LIÊN KẾT (TRANG MỒ CÔI) ===
+File: "${orphanPageId}"
+Tiêu đề: "${orphanTitle}"
+Nội dung node:
+${orphanContent.slice(0, 2000)}
+
+=== CÁC NODE HIỆN CÓ TRONG ĐỒ THỊ TRI THỨC WIKI ===
+${existingNodes.map(n => `- File: "${n.filename}", Tiêu đề: "${n.title}", Tóm tắt: "${n.summary}"`).join('\n')}
+`;
+
+            const llmRawResponse = await callLLM(systemPrompt, userPrompt, true);
+            const cleanJsonText = llmRawResponse.replace(/```json|```/g, '').trim();
+            const llmParsed = JSON.parse(cleanJsonText);
+
+            if (llmParsed && llmParsed.target_file && mdFiles.includes(llmParsed.target_file)) {
+              bestMatchFile = llmParsed.target_file;
+              equivalenceReason = llmParsed.equivalence_reason || 'Phát hiện cơ chế hoạt động và đặc điểm tương đương từ LLM.';
+              operationalMechanism = llmParsed.operational_mechanism || 'Cơ chế hoạt động tương đương';
+            }
+          } catch (llmErr) {
+            console.warn('[LLM Orphan Equivalence Detection] LLM call failed or produced fallback, falling back to content structure match:', llmErr.message);
+            // Fallback to structure/title matching if LLM fails
+            const orphanWords = new Set(orphanContent.toLowerCase().match(/\b[a-z0-9à-ỹ]{3,}\b/g) || []);
+            let maxScore = -1;
+            for (const node of existingNodes) {
+              const nodeWords = new Set(node.summary.toLowerCase().match(/\b[a-z0-9à-ỹ]{3,}\b/g) || []);
+              let overlap = 0;
+              for (const w of orphanWords) { if (nodeWords.has(w)) overlap++; }
+              if (overlap > maxScore) {
+                maxScore = overlap;
+                bestMatchFile = node.filename;
+                equivalenceReason = 'Tương đồng cấu trúc nội dung (Fallback)';
+              }
+            }
+          }
+        }
+
+        // If a matching node is identified, automatically bridge them
+        if (bestMatchFile) {
+          const targetPath = path.join(wikiDir, bestMatchFile);
+          let targetContent = await fs.readFile(targetPath, 'utf-8');
+          
+          // Append link to target file under "Xem thêm"
+          const linkAddition = `\n\n## Xem thêm (Cơ chế hoạt động tương đương)\n- [[${orphanTitle}]] : ${equivalenceReason}\n`;
+          if (!targetContent.includes(`[[${orphanTitle}]]`) && !targetContent.includes(orphanPageId)) {
+            targetContent += linkAddition;
+            await fs.writeFile(targetPath, targetContent, 'utf-8');
+            autoLinkedResults.push({
+              target_file: bestMatchFile,
+              target_title: pageTitles[bestMatchFile],
+              equivalence_reason: equivalenceReason,
+              operational_mechanism: operationalMechanism,
+              action: `LLM detected operational equivalence and linked orphan "${orphanPageId}" to target "${bestMatchFile}"`
+            });
+
+            // Also log to log.md
+            const logPath = path.join(wikiDir, 'log.md');
+            try {
+              const logContent = await fs.readFile(logPath, 'utf-8');
+              const newLog = logContent + `\n- [LLM-Equivalence-Bridge] Linked activated node **${orphanTitle}** to **${pageTitles[bestMatchFile]}** | Mechanism: ${operationalMechanism || 'Equivalency'} | Reason: ${equivalenceReason} (${new Date().toISOString()})`;
+              await fs.writeFile(logPath, newLog, 'utf-8');
+            } catch (e) {}
+          }
+        }
+      }
+
       return res.json({
-        status: isOrphan ? 'STEP_1_SUCCESS' : 'FAILED',
+        status: isOrphan ? 'SUCCESS' : 'FAILED',
         processed_at: new Date().toISOString(),
-        step: 1,
+        step: 2,
         message: isOrphan 
-          ? `Step 1 (Graph Linting) completed. "${orphanPageId}" is a valid orphan page.` 
-          : `Step 1 (Graph Linting) failed. "${orphanPageId}" is not a valid orphan page (deg- = ${inboundLinks[orphanPageId]?.length || 0}, deg+ = ${outboundLinks[orphanPageId]?.length || 0}).`,
+          ? `Autonomous Semantic Orphan Bridging completed for "${orphanPageId}". Linked to: ${autoLinkedResults.map(r => r.target_file).join(', ') || 'No suitable target found'}.` 
+          : `Graph linting failed. "${orphanPageId}" is not a valid orphan.`,
         is_orphan: isOrphan,
+        auto_linked: autoLinkedResults,
         all_orphans: orphansList
       });
     } catch (error) {
@@ -4265,6 +4585,162 @@ app.post('/api/projects/:id/wiki/auto-link-all', async (req, res) => {
       console.error('Error in auto-link-all step 1 (legacy):', error);
       return res.status(500).json({ error: error.message });
     }
+  }
+});
+
+/**
+ * POST /api/projects/:id/quiz/generate
+ * Generate multiple-choice quiz questions using LLM from selected wiki nodes
+ */
+app.post('/api/projects/:id/quiz/generate', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { selectedNodes = [], customPrompt = '', difficulty = 'medium', quantity = 'medium' } = req.body;
+
+    const projectPath = path.join(PROJECTS_DIR, id);
+    const wikiPath = path.join(projectPath, 'wiki');
+    try {
+      await fs.access(wikiPath);
+    } catch {
+      return res.status(404).json({ error: 'Không tìm thấy kho tri thức của dự án.' });
+    }
+
+    const files = await fs.readdir(wikiPath);
+    const mdFiles = files.filter(f => f.endsWith('.md') && f !== 'overview.md' && f !== 'purpose.md' && f !== 'index.md');
+
+    let targetFiles = mdFiles;
+    if (selectedNodes && selectedNodes.length > 0) {
+      targetFiles = mdFiles.filter(f => selectedNodes.includes(f));
+      if (targetFiles.length === 0) targetFiles = mdFiles;
+    }
+
+    let corpusText = '';
+    for (const file of targetFiles) {
+      try {
+        const content = await fs.readFile(path.join(wikiPath, file), 'utf-8');
+        corpusText += `\n\n--- FILE: ${file} ---\n${content}`;
+      } catch (e) {
+        // skip unreadable
+      }
+    }
+
+    if (!corpusText.trim()) {
+      return res.status(400).json({ error: 'Không tìm thấy nội dung tài liệu Wiki trong dự án để sinh câu hỏi.' });
+    }
+
+    const numQuestions = quantity === 'few' ? 3 : quantity === 'many' ? 10 : 5;
+    const diffDesc = difficulty === 'easy' ? 'Dễ (nhận biết, định nghĩa cơ bản, nhớ lại sự kiện/khái niệm)' : difficulty === 'hard' ? 'Khó (phân tích chuyên sâu, tình huống phức tạp, so sánh đa chiều, giải quyết vấn đề)' : 'Trung bình (hiểu bản chất, vận dụng logic, quy trình hoạt động)';
+
+    const systemPrompt = `Bạn là một Chuyên gia Giáo dục & Thiết kế Đánh giá Năng lực Tri thức. Nhiệm vụ của bạn là đọc kỹ nội dung các tệp Wiki được cung cấp và biên soạn một bộ câu hỏi trắc nghiệm chất lượng cao bằng tiếng Việt.
+
+Yêu cầu bắt buộc:
+1. **Grounding (Bám sát nội dung):** Tất cả các câu hỏi, phương án và đáp án phải dựa hoàn toàn vào nội dung trong tài liệu Wiki được cung cấp. Không bịa đặt thông tin ngoài ngữ cảnh.
+2. **Độ khó:** ${diffDesc}.
+3. **Số lượng:** Chính xác ${numQuestions} câu hỏi.
+4. **Cấu trúc phương án:** Mỗi câu hỏi có đúng 4 lựa chọn (A, B, C, D), chỉ có 1 đáp án đúng duy nhất.
+5. **Định dạng trả về:** Phải trả về DUY NHẤT một mảng JSON chuẩn xác 100% (không chứa markdown bao quanh ngoài json hoặc văn bản thừa), theo định dạng mẫu sau:
+[
+  {
+    "id": 1,
+    "question": "Nội dung câu hỏi...",
+    "options": [
+      { "key": "A", "text": "Lựa chọn A" },
+      { "key": "B", "text": "Lựa chọn B" },
+      { "key": "C", "text": "Lựa chọn C" },
+      { "key": "D", "text": "Lựa chọn D" }
+    ],
+    "correctKey": "A",
+    "explanation": "Giải thích chi tiết vì sao A đúng và dựa trên phần nào của tài liệu...",
+    "sourceNode": "ten_file.md"
+  }
+]`;
+
+    const userPrompt = `Dựa trên nội dung các tệp Wiki sau đây:${corpusText}
+
+Yêu cầu bổ sung từ người dùng: ${customPrompt || 'Tập trung vào các khái niệm cốt lõi, quy trình hoạt động và kiến thức quan trọng nhất.'}
+
+Hãy biên soạn chính xác ${numQuestions} câu hỏi trắc nghiệm với độ khó "${difficulty}". Trả về kết quả dưới dạng mảng JSON thuần túy.`;
+
+    const rawResponse = await callLLM(systemPrompt, userPrompt);
+    const questions = parseLLMJSON(rawResponse);
+
+    if (!Array.isArray(questions) || questions.length === 0) {
+      throw new Error('LLM không trả về danh sách câu hỏi hợp lệ.');
+    }
+
+    const quizzesFile = path.join(projectPath, 'quizzes.json');
+    let quizzes = [];
+    try {
+      const data = await fs.readFile(quizzesFile, 'utf-8');
+      quizzes = JSON.parse(data);
+    } catch (e) {
+      quizzes = [];
+    }
+
+    const quizId = 'quiz_' + Date.now();
+    const newQuiz = {
+      id: quizId,
+      createdAt: new Date().toISOString(),
+      title: customPrompt ? (customPrompt.length > 35 ? customPrompt.substring(0, 35) + '...' : customPrompt) : `Bộ đề ${difficulty} (${questions.length} câu)`,
+      difficulty,
+      quantity,
+      questions
+    };
+
+    quizzes.unshift(newQuiz);
+    if (quizzes.length > 20) quizzes = quizzes.slice(0, 20);
+    await fs.writeFile(quizzesFile, JSON.stringify(quizzes, null, 2), 'utf-8');
+
+    res.json({ success: true, questions });
+  } catch (err) {
+    console.error('Error generating quiz:', err);
+    res.status(500).json({ error: err.message || 'Lỗi khi sinh bộ câu hỏi trắc nghiệm.' });
+  }
+});
+
+/**
+ * GET /api/projects/:id/quiz/list
+ * Get list of saved quizzes for the project
+ */
+app.get('/api/projects/:id/quiz/list', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const quizzesFile = path.join(PROJECTS_DIR, id, 'quizzes.json');
+    let quizzes = [];
+    try {
+      const data = await fs.readFile(quizzesFile, 'utf-8');
+      quizzes = JSON.parse(data);
+    } catch (e) {
+      quizzes = [];
+    }
+    res.json({ success: true, quizzes });
+  } catch (err) {
+    console.error('Error listing quizzes:', err);
+    res.status(500).json({ error: 'Không thể tải danh sách trắc nghiệm.' });
+  }
+});
+
+/**
+ * DELETE /api/projects/:id/quiz/:quizId
+ * Delete a saved quiz
+ */
+app.delete('/api/projects/:id/quiz/:quizId', async (req, res) => {
+  try {
+    const { id, quizId } = req.params;
+    const quizzesFile = path.join(PROJECTS_DIR, id, 'quizzes.json');
+    let quizzes = [];
+    try {
+      const data = await fs.readFile(quizzesFile, 'utf-8');
+      quizzes = JSON.parse(data);
+    } catch (e) {
+      quizzes = [];
+    }
+    quizzes = quizzes.filter(q => q.id !== quizId);
+    await fs.writeFile(quizzesFile, JSON.stringify(quizzes, null, 2), 'utf-8');
+    res.json({ success: true, message: 'Đã xóa bài trắc nghiệm.' });
+  } catch (err) {
+    console.error('Error deleting quiz:', err);
+    res.status(500).json({ error: 'Không thể xóa bài trắc nghiệm.' });
   }
 });
 

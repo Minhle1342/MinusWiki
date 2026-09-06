@@ -35,9 +35,9 @@ const app = {
   },
 
   // Toast System
-  showToast(message, type = 'info') {
+  showToast(message, type = 'info', duration = 4000) {
     const container = document.getElementById('toast-container');
-    if (!container) return;
+    if (!container) return () => {};
 
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
@@ -69,7 +69,11 @@ const app = {
     toast.addEventListener('click', dismiss);
 
     // Remove toast automatically after 4 seconds
-    setTimeout(dismiss, 4000);
+    if (duration > 0) {
+      setTimeout(dismiss, duration);
+    }
+
+    return dismiss;
   },
 
   escapeHtml(str) {
@@ -1556,14 +1560,48 @@ const WikiTreeManager = {
         data.gaps.forEach(gap => {
           const li = document.createElement('li');
           li.className = 'gap-item';
+          li.title = 'Double-click để tự động sinh node (Tài liệu) và giải quyết lỗ hổng';
           
           const tagsHtml = (gap.suggested_topics || []).map(t => `<span class="gap-tag">${t}</span>`).join('');
 
           li.innerHTML = `
-            <div class="gap-title" style="margin-bottom: 5px;">${gap.gap}</div>
+            <div class="gap-title" style="margin-bottom: 5px;">${gap.gap} <span style="font-size: 0.7rem; color: #14B8A6; float: right; font-weight: normal;">(Double-click để sinh node)</span></div>
             <div class="gap-desc">${gap.description}</div>
             <div class="gap-tags">${tagsHtml}</div>
           `;
+
+          li.addEventListener('dblclick', async () => {
+            if (!confirm(`Bạn có muốn tự động sinh node (Tài liệu) cho lỗ hổng nghiên cứu:\n"${gap.gap}" không?`)) return;
+            const dismissLoading = app.showToast('Đang tự động sinh node tài liệu từ lỗ hổng nghiên cứu...', 'info', 0);
+            try {
+              const res = await fetch('/api/maintenance/generate-gap-node', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ projectId: app.state.currentProjectId, gap })
+              });
+              const data = await res.json();
+              dismissLoading();
+              if (data.success) {
+                app.showToast(`Đã sinh thành công node: "${data.title}"`, 'success');
+                if (typeof MaintenanceManager !== 'undefined' && MaintenanceManager.loadMaintenanceData) {
+                  MaintenanceManager.loadMaintenanceData();
+                }
+                if (typeof GraphManager !== 'undefined' && GraphManager.loadGraphData) {
+                  GraphManager.loadGraphData();
+                }
+                if (data.filename) {
+                  app.events.emit('wiki:page-selected', data.filename);
+                }
+              } else {
+                app.showToast(data.error || 'Sinh node thất bại.', 'error');
+              }
+            } catch (err) {
+              console.error(err);
+              dismissLoading();
+              app.showToast('Lỗi kết nối khi sinh node.', 'error');
+            }
+          });
+
           this.gapsList.appendChild(li);
         });
       }
@@ -1827,10 +1865,49 @@ const GraphManager = {
       .on("click", (event, d) => {
         event.stopPropagation();
         if (d.isGap) {
-          app.showToast(`Lỗ hổng kiến thức: ${d.description || 'Chưa được nghiên cứu'}`, 'info');
+          app.showToast(`Lỗ hổng kiến thức: ${d.description || 'Chưa được nghiên cứu'} (Double-click để sinh node tài liệu)`, 'info');
           return;
         }
         app.events.emit('wiki:page-selected', `${d.id}.md`);
+      })
+      .on("dblclick", async (event, d) => {
+        event.stopPropagation();
+        if (!d.isGap) return;
+        const gapTitle = d.label.replace(/^🔍\s*/, '');
+        if (!confirm(`Bạn có muốn tự động sinh node (Tài liệu) cho lỗ hổng nghiên cứu trên canvas:\n"${gapTitle}" không?`)) return;
+        app.showToast('Đang tự động sinh node tài liệu từ lỗ hổng nghiên cứu...', 'info');
+        try {
+          const res = await fetch('/api/maintenance/generate-gap-node', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              projectId: app.state.currentProjectId,
+              gap: {
+                gap: gapTitle,
+                description: d.description || '',
+                suggested_topics: d.suggested_topics || []
+              }
+            })
+          });
+          const data = await res.json();
+          if (data.success) {
+            app.showToast(`Đã sinh thành công node: "${data.title}"`, 'success');
+            if (typeof MaintenanceManager !== 'undefined' && MaintenanceManager.loadMaintenanceData) {
+              MaintenanceManager.loadMaintenanceData();
+            }
+            if (typeof GraphManager !== 'undefined' && GraphManager.loadGraphData) {
+              GraphManager.loadGraphData();
+            }
+            if (data.filename) {
+              app.events.emit('wiki:page-selected', data.filename);
+            }
+          } else {
+            app.showToast(data.error || 'Sinh node thất bại.', 'error');
+          }
+        } catch (err) {
+          console.error(err);
+          app.showToast('Lỗi kết nối khi sinh node.', 'error');
+        }
       });
 
     // Text Label elements
@@ -2336,12 +2413,675 @@ const RightPanelResizer = {
     if (savedWidth) {
       this.panel.style.width = savedWidth;
     }
+  },
+
+  async loadSavedQuizzes() {
+    if (!app.state.currentProjectId) return;
+    const container = document.getElementById('saved-quizzes-list');
+    if (!container) return;
+
+    try {
+      const res = await fetch(`/api/projects/${app.state.currentProjectId}/quiz/list`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.quizzes)) {
+        container.innerHTML = '';
+        if (data.quizzes.length === 0) {
+          container.innerHTML = '<span style="font-size: 11px; color: var(--text-muted);">Chưa có bộ đề trắc nghiệm được lưu</span>';
+          return;
+        }
+
+        data.quizzes.forEach(quiz => {
+          const item = document.createElement('div');
+          item.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 6px; font-size: 11px;';
+          
+          const dateStr = new Date(quiz.createdAt).toLocaleDateString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+          item.innerHTML = `
+            <div style="display: flex; flex-direction: column; overflow: hidden; max-width: 170px;">
+              <strong style="color: var(--text-color); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${quiz.title}">${quiz.title}</strong>
+              <span style="color: var(--text-muted); font-size: 10px;">${dateStr} • ${quiz.questions.length} câu</span>
+            </div>
+            <div style="display: flex; gap: 4px;">
+              <button class="btn btn-sm btn-primary btn-retake-saved" data-id="${quiz.id}" style="padding: 2px 6px; font-size: 10px;">Làm bài</button>
+              <button class="btn btn-sm btn-secondary btn-delete-saved" data-id="${quiz.id}" style="padding: 2px 6px; font-size: 10px; color: #ef4444;"><i data-lucide="trash-2" style="width: 10px; height: 10px;"></i></button>
+            </div>
+          `;
+
+          item.querySelector('.btn-retake-saved').addEventListener('click', () => {
+            this.questions = quiz.questions;
+            this.startRunnerView(this.questions);
+            app.showToast(`Đã tải bộ đề: "${quiz.title}"`, 'info');
+          });
+
+          item.querySelector('.btn-delete-saved').addEventListener('click', async () => {
+            if (!confirm(`Bạn có chắc muốn xóa bộ đề "${quiz.title}" này không?`)) return;
+            try {
+              const delRes = await fetch(`/api/projects/${app.state.currentProjectId}/quiz/${quiz.id}`, { method: 'DELETE' });
+              const delData = await delRes.json();
+              if (delData.success) {
+                app.showToast('Đã xóa bộ đề trắc nghiệm.', 'success');
+                this.loadSavedQuizzes();
+              } else {
+                app.showToast(delData.error || 'Xóa thất bại.', 'error');
+              }
+            } catch (err) {
+              console.error(err);
+              app.showToast('Lỗi khi xóa bộ đề.', 'error');
+            }
+          });
+
+          container.appendChild(item);
+        });
+        lucide.createIcons();
+      }
+    } catch (err) {
+      console.error('Error loading saved quizzes:', err);
+      container.innerHTML = '<span style="font-size: 11px; color: #ef4444;">Không thể tải danh sách bộ đề.</span>';
+    }
+  },
+
+  afterQuizGenerated() {
+    this.loadSavedQuizzes();
   }
 };
 
 // ==========================================
 // 5. BOOTSTRAP INITIALIZATION
 // ==========================================
+// ==========================================
+// QUIZ MANAGER (AI Quiz Generator & Runner)
+// ==========================================
+const QuizManager = {
+  questions: [],
+  userAnswers: {},
+  currentQuestionIndex: 0,
+  currentScore: 0,
+
+  async loadSavedQuizzes() {
+    if (!app.state.currentProjectId) return;
+    const container = document.getElementById('saved-quizzes-list');
+    if (!container) return;
+
+    try {
+      const res = await fetch(`/api/projects/${app.state.currentProjectId}/quiz/list`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.quizzes)) {
+        container.innerHTML = '';
+        if (data.quizzes.length === 0) {
+          container.innerHTML = '<span style="font-size: 11px; color: var(--text-muted);">Chưa có bộ đề trắc nghiệm được lưu</span>';
+          return;
+        }
+
+        data.quizzes.forEach(quiz => {
+          const item = document.createElement('div');
+          item.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 6px; font-size: 11px;';
+          
+          const dateStr = new Date(quiz.createdAt).toLocaleDateString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+          item.innerHTML = `
+            <div style="display: flex; flex-direction: column; overflow: hidden; max-width: 170px;">
+              <strong style="color: var(--text-color); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${quiz.title}">${quiz.title}</strong>
+              <span style="color: var(--text-muted); font-size: 10px;">${dateStr} • ${quiz.questions.length} câu</span>
+            </div>
+            <div style="display: flex; gap: 4px;">
+              <button class="btn btn-sm btn-primary btn-retake-saved" data-id="${quiz.id}" style="padding: 2px 6px; font-size: 10px;">Làm bài</button>
+              <button class="btn btn-sm btn-secondary btn-delete-saved" data-id="${quiz.id}" style="padding: 2px 6px; font-size: 10px; color: #ef4444;"><i data-lucide="trash-2" style="width: 10px; height: 10px;"></i></button>
+            </div>
+          `;
+
+          item.querySelector('.btn-retake-saved').addEventListener('click', () => {
+            this.questions = quiz.questions;
+            this.startRunnerView(this.questions);
+            app.showToast(`Đã tải bộ đề: "${quiz.title}"`, 'info');
+          });
+
+          item.querySelector('.btn-delete-saved').addEventListener('click', async () => {
+            if (!confirm(`Bạn có chắc muốn xóa bộ đề "${quiz.title}" này không?`)) return;
+            try {
+              const delRes = await fetch(`/api/projects/${app.state.currentProjectId}/quiz/${quiz.id}`, { method: 'DELETE' });
+              const delData = await delRes.json();
+              if (delData.success) {
+                app.showToast('Đã xóa bộ đề trắc nghiệm.', 'success');
+                this.loadSavedQuizzes();
+              } else {
+                app.showToast(delData.error || 'Xóa thất bại.', 'error');
+              }
+            } catch (err) {
+              console.error(err);
+              app.showToast('Lỗi khi xóa bộ đề.', 'error');
+            }
+          });
+
+          container.appendChild(item);
+        });
+        lucide.createIcons();
+      }
+    } catch (err) {
+      console.error('Error loading saved quizzes:', err);
+      container.innerHTML = '<span style="font-size: 11px; color: #ef4444;">Không thể tải danh sách bộ đề.</span>';
+    }
+  },
+
+  init() {
+    const tabQuizBtn = document.getElementById('tab-btn-quiz');
+    if (!tabQuizBtn) return;
+
+    // Load available wiki nodes when project changes or tab opens
+    tabQuizBtn.addEventListener('click', () => {
+      this.loadWikiNodes();
+      this.loadSavedQuizzes();
+    });
+
+    app.events.on('project:switched', () => {
+      this.loadWikiNodes();
+      this.loadSavedQuizzes();
+    });
+
+    // Select all nodes checkbox
+    const selectAllCheckbox = document.getElementById('quiz-select-all-nodes');
+    if (selectAllCheckbox) {
+      selectAllCheckbox.addEventListener('change', (e) => {
+        const checkboxes = document.querySelectorAll('.quiz-node-checkbox');
+        checkboxes.forEach(cb => {
+          cb.checked = e.target.checked;
+        });
+      });
+    }
+
+    // Suggestion tags click
+    const suggestionTags = document.querySelectorAll('.quiz-tag');
+    suggestionTags.forEach(tag => {
+      tag.addEventListener('click', () => {
+        const promptInput = document.getElementById('quiz-custom-prompt');
+        if (promptInput) {
+          const text = tag.dataset.text;
+          promptInput.value = promptInput.value ? promptInput.value + '; ' + text : text;
+        }
+      });
+    });
+
+    // Difficulty & Quantity Segmented Pickers
+    this.setupSegmentedPicker('quiz-difficulty-picker');
+    this.setupSegmentedPicker('quiz-quantity-picker');
+
+    // Generate Quiz Button
+    const generateBtn = document.getElementById('btn-generate-quiz');
+    if (generateBtn) {
+      generateBtn.addEventListener('click', () => {
+        this.generateQuiz();
+      });
+    }
+
+    // Back to setup
+    const backBtn = document.getElementById('btn-back-to-setup');
+    if (backBtn) {
+      backBtn.addEventListener('click', () => {
+        this.showSetupView();
+      });
+    }
+
+    // Submit quiz
+    const submitBtn = document.getElementById('btn-submit-quiz');
+    if (submitBtn) {
+      submitBtn.addEventListener('click', () => {
+        this.submitQuiz();
+      });
+    }
+
+    // Retake & New quiz
+    const retakeBtn = document.getElementById('btn-retake-quiz');
+    if (retakeBtn) {
+      retakeBtn.addEventListener('click', () => {
+        this.startRunnerView(this.questions);
+      });
+    }
+
+    const newQuizBtn = document.getElementById('btn-new-quiz');
+    if (newQuizBtn) {
+      newQuizBtn.addEventListener('click', () => {
+        this.showSetupView();
+      });
+    }
+    this.initQuizScopeHandlers();
+  },
+
+  setupSegmentedPicker(containerId) {
+    const container = document.getElementById(containerId);
+    if (!container) return;
+    const buttons = container.querySelectorAll('.seg-btn');
+    buttons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        buttons.forEach(b => {
+          b.classList.remove('active');
+          b.style.background = 'transparent';
+          b.style.color = 'var(--text-muted)';
+        });
+        btn.classList.add('active');
+        btn.style.background = 'var(--primary-color)';
+        btn.style.color = 'white';
+      });
+    });
+  },
+
+  getSelectedDifficulty() {
+    const active = document.querySelector('#quiz-difficulty-picker .seg-btn.active');
+    return active ? active.dataset.value : 'medium';
+  },
+
+  getSelectedQuantity() {
+    const active = document.querySelector('#quiz-quantity-picker .seg-btn.active');
+    return active ? active.dataset.value : 'medium';
+  },
+
+  async loadWikiNodes() {
+    if (!app.state.currentProjectId) return;
+    const container = document.getElementById('quiz-nodes-checkboxes');
+    if (!container) return;
+
+    try {
+      const res = await fetch(`/api/projects/${app.state.currentProjectId}/wiki`);
+      const data = await res.json();
+      if (data.success && Array.isArray(data.pages)) {
+        this.wikiPages = data.pages; // Store for keyword search
+        container.innerHTML = '';
+        if (data.pages.length === 0) {
+          container.innerHTML = '<span style="font-size: 11px; color: var(--text-muted);">Chưa có trang Wiki nào.</span>';
+          return;
+        }
+
+        data.pages.forEach(page => {
+          const filename = page.filename || page.slug + '.md';
+          const title = page.title || filename;
+          const label = document.createElement('label');
+          label.className = 'checkbox-label';
+          label.style.cssText = 'display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 400; cursor: pointer; color: var(--text-secondary);';
+          
+          const isCurrentActive = app.state.currentFilename === filename;
+          label.innerHTML = `
+            <input type="checkbox" class="quiz-node-checkbox" value="${filename}" ${isCurrentActive ? 'checked' : ''} style="width: 12px; height: 12px; accent-color: var(--primary-color);">
+            <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${title}">${title}</span>
+          `;
+          container.appendChild(label);
+        });
+
+        this.initQuizScopeHandlers();
+      }
+    } catch (err) {
+      console.error('Error loading wiki nodes for quiz:', err);
+    }
+  },
+
+  initQuizScopeHandlers() {
+    const toggleBtn = document.getElementById('quiz-scope-toggle-btn');
+    const backBtn = document.getElementById('quiz-back-to-all');
+    const allContainer = document.getElementById('quiz-scope-all-container');
+    const keywordContainer = document.getElementById('quiz-scope-keyword-container');
+    const keywordInput = document.getElementById('quiz-keyword-input');
+    const selectAllBtn = document.getElementById('quiz-keyword-select-all');
+
+    if (toggleBtn && !toggleBtn._hasClickListener) {
+      toggleBtn._hasClickListener = true;
+      toggleBtn.addEventListener('click', () => {
+        if (allContainer) allContainer.classList.add('hidden');
+        if (keywordContainer) keywordContainer.classList.remove('hidden');
+        toggleBtn.style.display = 'none';
+        this.filterWikiNodesByKeyword(keywordInput?.value || '');
+      });
+    }
+
+    if (backBtn && !backBtn._hasClickListener) {
+      backBtn._hasClickListener = true;
+      backBtn.addEventListener('click', () => {
+        if (allContainer) allContainer.classList.remove('hidden');
+        if (keywordContainer) keywordContainer.classList.add('hidden');
+        if (toggleBtn) toggleBtn.style.display = 'flex';
+      });
+    }
+
+    if (keywordInput && !keywordInput._hasInputListener) {
+      keywordInput._hasInputListener = true;
+      keywordInput.addEventListener('input', (e) => {
+        this.filterWikiNodesByKeyword(e.target.value);
+      });
+    }
+
+    if (selectAllBtn && !selectAllBtn._hasClickListener) {
+      selectAllBtn._hasClickListener = true;
+      selectAllBtn.addEventListener('click', () => {
+        const checkboxes = document.querySelectorAll('.quiz-keyword-node-checkbox');
+        const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+        checkboxes.forEach(cb => cb.checked = !allChecked);
+      });
+    }
+  },
+
+  removeAccents(str) {
+    if (!str) return '';
+    return str.normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '')
+              .replace(/đ/g, 'd').replace(/Đ/g, 'D');
+  },
+
+  filterWikiNodesByKeyword(query) {
+    const suggestionsContainer = document.getElementById('quiz-keyword-suggestions');
+    const matchCountEl = document.getElementById('quiz-keyword-match-count');
+    if (!suggestionsContainer) return;
+
+    const q = (query || '').trim().toLowerCase();
+    const qClean = this.removeAccents(q);
+    const pages = this.wikiPages || [];
+
+    if (pages.length === 0 && app.state.currentProjectId) {
+      this.loadWikiNodes().then(() => {
+        if (this.wikiPages && this.wikiPages.length > 0) {
+          this.filterWikiNodesByKeyword(query);
+        }
+      });
+      return;
+    }
+
+    // If query is empty, show all pages so the user can browse/select nodes immediately
+    const matchedPages = !q ? pages : pages.filter(page => {
+      const title = (page.title || '').normalize('NFC').toLowerCase();
+      const content = (page.content || '').normalize('NFC').toLowerCase();
+      const filename = (page.filename || page.slug || '').normalize('NFC').toLowerCase();
+
+      const titleClean = this.removeAccents(title);
+      const contentClean = this.removeAccents(content);
+      const filenameClean = this.removeAccents(filename);
+
+      return title.includes(q) || content.includes(q) || filename.includes(q) ||
+             titleClean.includes(qClean) || contentClean.includes(qClean) || filenameClean.includes(qClean);
+    });
+
+    if (matchCountEl) {
+      matchCountEl.textContent = q ? `Gợi ý node phù hợp: ${matchedPages.length}` : `Toàn bộ node: ${matchedPages.length}`;
+    }
+
+    suggestionsContainer.innerHTML = '';
+    if (matchedPages.length === 0) {
+      suggestionsContainer.innerHTML = '<span style="font-size: 11px; color: var(--text-muted);">Không tìm thấy node nào khớp với từ khóa.</span>';
+      return;
+    }
+
+    matchedPages.forEach(page => {
+      const filename = page.filename || page.slug + '.md';
+      const title = page.title || filename;
+      const label = document.createElement('label');
+      label.className = 'checkbox-label';
+      label.style.cssText = 'display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 400; cursor: pointer; color: var(--text-secondary);';
+      
+      label.innerHTML = `
+        <input type="checkbox" class="quiz-keyword-node-checkbox" value="${filename}" checked style="width: 12px; height: 12px; accent-color: var(--primary-color);">
+        <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${title}">${title}</span>
+      `;
+      suggestionsContainer.appendChild(label);
+    });
+  },
+
+  async generateQuiz() {
+    if (!app.state.currentProjectId) {
+      app.showToast('Vui lòng chọn hoặc tạo dự án trước.', 'warning');
+      return;
+    }
+
+    const keywordContainer = document.getElementById('quiz-scope-keyword-container');
+    const isKeywordMode = keywordContainer && !keywordContainer.classList.contains('hidden');
+
+    let selectedNodes = [];
+    if (isKeywordMode) {
+      const keywordCheckboxes = document.querySelectorAll('.quiz-keyword-node-checkbox:checked');
+      keywordCheckboxes.forEach(cb => selectedNodes.push(cb.value));
+      if (selectedNodes.length === 0) {
+        app.showToast('Vui lòng chọn ít nhất một node từ kết quả tìm kiếm từ khóa.', 'warning');
+        return;
+      }
+    } else {
+      // Default All KB -> empty array means all nodes
+      selectedNodes = [];
+    }
+
+    const customPrompt = document.getElementById('quiz-custom-prompt')?.value || '';
+    const difficulty = this.getSelectedDifficulty();
+    const quantity = this.getSelectedQuantity();
+
+    const dismissLoading = app.showToast('Đang yêu cầu AI phân tích tài liệu và sinh bộ câu hỏi trắc nghiệm...', 'info', 0);
+
+    try {
+      const res = await fetch(`/api/projects/${app.state.currentProjectId}/quiz/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selectedNodes, customPrompt, difficulty, quantity })
+      });
+      const data = await res.json();
+      dismissLoading();
+
+      if (data.success && Array.isArray(data.questions)) {
+        this.questions = data.questions;
+        app.showToast(`Đã sinh thành công ${this.questions.length} câu hỏi trắc nghiệm!`, 'success');
+        this.loadSavedQuizzes();
+        this.startRunnerView(this.questions);
+      } else {
+        app.showToast(data.error || 'Sinh câu hỏi thất bại.', 'error');
+      }
+    } catch (err) {
+      console.error(err);
+      dismissLoading();
+      app.showToast('Lỗi kết nối khi sinh câu hỏi.', 'error');
+    }
+  },
+
+  showSetupView() {
+    document.getElementById('quiz-setup-view').classList.remove('hidden');
+    document.getElementById('quiz-runner-view').classList.add('hidden');
+    document.getElementById('quiz-result-view').classList.add('hidden');
+  },
+
+  startRunnerView(questions) {
+    this.userAnswers = {};
+    this.currentQuestionIndex = 0;
+    document.getElementById('quiz-setup-view').classList.add('hidden');
+    document.getElementById('quiz-runner-view').classList.remove('hidden');
+    document.getElementById('quiz-result-view').classList.add('hidden');
+
+    this.renderCurrentQuestion();
+  },
+
+  renderCurrentQuestion() {
+    const container = document.getElementById('quiz-questions-container');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const questions = this.questions;
+    const idx = this.currentQuestionIndex;
+    const q = questions[idx];
+    if (!q) return;
+
+    const card = document.createElement('div');
+    card.className = 'quiz-question-card';
+    card.style.cssText = 'background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 10px;';
+    
+    const hasAnswered = this.userAnswers[idx] !== undefined;
+    const selectedKey = this.userAnswers[idx];
+
+    let optionsHTML = '';
+    q.options.forEach(opt => {
+      const isSelected = selectedKey === opt.key;
+      let optStyle = 'display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 8px 10px; background: var(--bg-main); border: 1px solid ' + (isSelected ? 'var(--primary-color)' : 'var(--border-color)') + '; border-radius: 6px; cursor: pointer; transition: all 0.2s;';
+      
+      if (hasAnswered) {
+        if (opt.key === q.correctKey) {
+          optStyle = 'display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 8px 10px; background: rgba(16, 185, 129, 0.15); border: 1px solid #10b981; border-radius: 6px; color: #10b981; font-weight: 600;';
+        } else if (selectedKey === opt.key && opt.key !== q.correctKey) {
+          optStyle = 'display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 8px 10px; background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; border-radius: 6px; color: #ef4444; font-weight: 600;';
+        }
+      }
+
+      optionsHTML += `
+        <div class="quiz-option-item" data-key="${opt.key}" style="${optStyle}">
+          <strong style="color: var(--primary-color);">${opt.key}.</strong>
+          <span style="color: inherit;">${opt.text}</span>
+        </div>
+      `;
+    });
+
+    let feedbackHTML = '';
+    if (hasAnswered) {
+      const isCorrect = selectedKey === q.correctKey;
+      feedbackHTML = `
+        <div style="margin-top: 4px; padding: 10px; background: ${isCorrect ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)'}; border: 1px solid ${isCorrect ? '#10b981' : '#ef4444'}; border-radius: 6px; font-size: 11px; display: flex; flex-direction: column; gap: 4px;">
+          <div style="font-weight: 600; color: ${isCorrect ? '#10b981' : '#ef4444'};">
+            ${isCorrect ? '✨ Chính xác!' : `❌ Chưa chính xác. Đáp án đúng là: ${q.correctKey}`}
+          </div>
+          <div style="color: var(--text-secondary);">💡 <strong>Giải thích:</strong> ${q.explanation}</div>
+          ${q.sourceNode ? `<div style="margin-top: 2px;"><a href="#" class="quiz-source-link" data-filename="${q.sourceNode}" style="color: var(--primary-color); text-decoration: underline;">📄 Nguồn: ${q.sourceNode}</a></div>` : ''}
+        </div>
+      `;
+    }
+
+    card.innerHTML = `
+      <div style="font-size: 13px; font-weight: 600; color: var(--text-color); display: flex; justify-content: space-between; align-items: center;">
+        <span><span style="color: #14B8A6; margin-right: 6px;">Câu ${idx + 1} / ${questions.length}:</span>${q.question}</span>
+      </div>
+      <div class="quiz-options-list" style="display: flex; flex-direction: column; gap: 6px; margin-top: 4px;">
+        ${optionsHTML}
+      </div>
+      ${feedbackHTML}
+    `;
+
+    const sourceLink = card.querySelector('.quiz-source-link');
+    if (sourceLink) {
+      sourceLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        app.events.emit('wiki:page-selected', sourceLink.dataset.filename);
+      });
+    }
+
+    if (!hasAnswered) {
+      card.querySelectorAll('.quiz-option-item').forEach(item => {
+        item.addEventListener('click', () => {
+          const key = item.getAttribute('data-key');
+          this.userAnswers[idx] = key;
+          this.renderCurrentQuestion();
+        });
+      });
+    }
+
+    container.appendChild(card);
+
+    const badge = document.getElementById('quiz-progress-badge');
+    if (badge) badge.textContent = `Câu ${idx + 1} / ${questions.length}`;
+
+    const footerContainer = document.querySelector('.quiz-runner-footer');
+    if (footerContainer) {
+      const isLast = idx === questions.length - 1;
+      const isFirst = idx === 0;
+
+      footerContainer.innerHTML = `
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <button id="btn-quiz-prev" class="btn btn-secondary btn-sm btn-icon-text" ${isFirst ? 'disabled style="opacity: 0.5; cursor: not-allowed; flex: 1; justify-content: center;"' : 'style="flex: 1; justify-content: center;"'}>
+            <i data-lucide="chevron-left"></i><span>Câu trước</span>
+          </button>
+          ${isLast ? `
+            <button id="btn-submit-quiz" class="btn btn-success btn-sm btn-icon-text" style="flex: 2; justify-content: center;">
+              <i data-lucide="award"></i><span>Xem kết quả</span>
+            </button>
+          ` : `
+            <button id="btn-quiz-next" class="btn btn-primary btn-sm btn-icon-text" style="flex: 1; justify-content: center;">
+              <span>Câu sau</span><i data-lucide="chevron-right"></i>
+            </button>
+          `}
+        </div>
+      `;
+
+      document.getElementById('btn-quiz-prev')?.addEventListener('click', () => {
+        if (this.currentQuestionIndex > 0) {
+          this.currentQuestionIndex--;
+          this.renderCurrentQuestion();
+        }
+      });
+
+      document.getElementById('btn-quiz-next')?.addEventListener('click', () => {
+        if (this.currentQuestionIndex < this.questions.length - 1) {
+          this.currentQuestionIndex++;
+          this.renderCurrentQuestion();
+        }
+      });
+
+      document.getElementById('btn-submit-quiz')?.addEventListener('click', () => {
+        this.submitQuiz();
+      });
+
+      lucide.createIcons();
+    }
+  },
+
+  submitQuiz() {
+    if (Object.keys(this.userAnswers).length === 0) {
+      if (!confirm('Bạn chưa trả lời câu hỏi nào. Bạn có chắc chắn muốn nộp bài?')) return;
+    }
+
+    let correctCount = 0;
+    this.questions.forEach((q, idx) => {
+      if (this.userAnswers[idx] && this.userAnswers[idx].trim().toUpperCase() === q.correctKey.trim().toUpperCase()) {
+        correctCount++;
+      }
+    });
+
+    const total = this.questions.length;
+    const percent = Math.round((correctCount / total) * 100);
+    this.currentScore = correctCount;
+
+    document.getElementById('quiz-runner-view').classList.add('hidden');
+    document.getElementById('quiz-result-view').classList.remove('hidden');
+
+    const scoreDisplay = document.getElementById('quiz-score-display');
+    const scoreComment = document.getElementById('quiz-score-comment');
+    if (scoreDisplay) scoreDisplay.textContent = `${correctCount} / ${total} (${percent}%)`;
+    if (scoreComment) {
+      scoreComment.textContent = percent >= 80 ? '🌟 Xuất sắc! Bạn nắm rất vững kiến thức cốt lõi.' : percent >= 50 ? '👍 Khá tốt! Hãy ôn lại một số phần chi tiết.' : '📖 Cần cố gắng hơn! Hãy đọc kỹ lại các tài liệu nguồn.';
+    }
+
+    const reviewContainer = document.getElementById('quiz-review-container');
+    if (!reviewContainer) return;
+    reviewContainer.innerHTML = '';
+
+    this.questions.forEach((q, idx) => {
+      const userAnswer = this.userAnswers[idx] || 'Chưa trả lời';
+      const isCorrect = userAnswer === q.correctKey;
+      const reviewCard = document.createElement('div');
+      reviewCard.style.cssText = `background: var(--bg-card); border: 1px solid ${isCorrect ? 'rgba(16, 185, 129, 0.4)' : 'rgba(239, 68, 68, 0.4)'}; border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 6px;`;
+      
+      let badgeHtml = isCorrect 
+        ? '<span style="font-size: 10px; padding: 2px 6px; background: rgba(16, 185, 129, 0.15); color: #10b981; border-radius: 4px; font-weight: 600;">ĐÚNG</span>'
+        : '<span style="font-size: 10px; padding: 2px 6px; background: rgba(239, 68, 68, 0.15); color: #ef4444; border-radius: 4px; font-weight: 600;">SAI</span>';
+
+      reviewCard.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <strong style="font-size: 12px; color: var(--text-color);">Câu ${idx + 1}: ${q.question}</strong>
+          ${badgeHtml}
+        </div>
+        <div style="font-size: 11px; color: var(--text-secondary);">
+          Đáp án của bạn: <strong style="color: ${isCorrect ? '#10b981' : '#ef4444'};">${userAnswer}</strong> | Đáp án đúng: <strong style="color: #10b981;">${q.correctKey}</strong>
+        </div>
+        <div style="font-size: 11px; color: var(--text-muted); background: var(--bg-main); padding: 6px 8px; border-radius: 6px; margin-top: 2px;">
+          💡 <strong>Giải thích:</strong> ${q.explanation}
+        </div>
+        ${q.sourceNode ? `<div style="font-size: 11px; margin-top: 2px;"><a href="#" class="quiz-source-link" data-filename="${q.sourceNode}" style="color: var(--primary-color); text-decoration: underline;">📄 Nguồn: ${q.sourceNode}</a></div>` : ''}
+      `;
+
+      const sourceLink = reviewCard.querySelector('.quiz-source-link');
+      if (sourceLink) {
+        sourceLink.addEventListener('click', (e) => {
+          e.preventDefault();
+          const filename = sourceLink.dataset.filename;
+          app.events.emit('wiki:page-selected', filename);
+        });
+      }
+
+      reviewContainer.appendChild(reviewCard);
+    });
+  }
+};
+
 document.addEventListener('DOMContentLoaded', () => {
   // Initialize Modules
   ProjectManager.init();
@@ -2350,6 +3090,7 @@ document.addEventListener('DOMContentLoaded', () => {
   WikiTreeManager.init();
   GraphManager.init();
   ChatManager.init();
+  QuizManager.init();
   RightPanelResizer.init();
   
   // Right Drawer Tab switcher bind
